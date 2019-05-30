@@ -1,0 +1,48 @@
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# OS X
+.DS_Store
+
+# Qt Creator
+CMakeLists.txt.user
+
+# Eclipse
+.project
+
+#Linux autosavefiles
+*~
+
+# Compiled Python files
+*.pyc
+__pycache__/
+
+# PyCharm
+.idea/
+

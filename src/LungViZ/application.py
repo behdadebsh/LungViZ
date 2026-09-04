@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from itertools import permutations
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -77,6 +78,101 @@ def _finite_for_display(values: np.ndarray) -> np.ndarray:
     return np.nan_to_num(values, nan=replacement, posinf=replacement, neginf=replacement)
 
 
+def _display_indices(size: int, maximum: int = 384) -> np.ndarray:
+    if size <= maximum:
+        return np.arange(size, dtype=int)
+    return np.unique(np.linspace(0, size - 1, maximum).round().astype(int))
+
+
+def _slice_geometry(volume: CTVolume, axis: int, index: int):
+    """Create a downsampled rectangular mesh for one native CT slice."""
+
+    plane_axes = [candidate for candidate in range(3) if candidate != axis]
+    first_indices = _display_indices(volume.values.shape[plane_axes[0]])
+    second_indices = _display_indices(volume.values.shape[plane_axes[1]])
+    first, second = np.meshgrid(first_indices, second_indices, indexing="ij")
+    vertices = np.zeros((first.size, 3), dtype=float)
+    vertices[:, axis] = index * volume.spacing[axis]
+    vertices[:, plane_axes[0]] = first.ravel() * volume.spacing[plane_axes[0]]
+    vertices[:, plane_axes[1]] = second.ravel() * volume.spacing[plane_axes[1]]
+
+    grid = np.arange(first.size, dtype=int).reshape(first.shape)
+    faces = np.column_stack(
+        (
+            grid[:-1, :-1].ravel(),
+            grid[1:, :-1].ravel(),
+            grid[1:, 1:].ravel(),
+            grid[:-1, 1:].ravel(),
+        )
+    )
+    return vertices, faces
+
+
+def _sample_volume(volume: CTVolume, vertices: np.ndarray, transform: np.ndarray):
+    """Trilinearly sample the CT at transformed plane vertices."""
+
+    homogeneous = np.column_stack((vertices, np.ones(len(vertices), dtype=float)))
+    world = homogeneous @ np.asarray(transform, dtype=float).T
+    local = world @ np.linalg.inv(volume.transform).T
+    coordinates = local[:, :3] / volume.spacing
+    shape = np.asarray(volume.values.shape, dtype=int)
+    valid = np.all((coordinates >= 0) & (coordinates <= shape - 1), axis=1)
+    clipped = np.clip(coordinates, 0, shape - 1)
+    lower = np.floor(clipped).astype(int)
+    upper = np.minimum(lower + 1, shape - 1)
+    fraction = clipped - lower
+
+    sampled = np.full(len(vertices), volume.display_range[0], dtype=float)
+    if not np.any(valid):
+        return sampled
+    lo = lower[valid]
+    hi = upper[valid]
+    weight = fraction[valid]
+    data = volume.values
+    c00 = data[lo[:, 0], lo[:, 1], lo[:, 2]] * (1 - weight[:, 0]) + data[
+        hi[:, 0], lo[:, 1], lo[:, 2]
+    ] * weight[:, 0]
+    c01 = data[lo[:, 0], lo[:, 1], hi[:, 2]] * (1 - weight[:, 0]) + data[
+        hi[:, 0], lo[:, 1], hi[:, 2]
+    ] * weight[:, 0]
+    c10 = data[lo[:, 0], hi[:, 1], lo[:, 2]] * (1 - weight[:, 0]) + data[
+        hi[:, 0], hi[:, 1], lo[:, 2]
+    ] * weight[:, 0]
+    c11 = data[lo[:, 0], hi[:, 1], hi[:, 2]] * (1 - weight[:, 0]) + data[
+        hi[:, 0], hi[:, 1], hi[:, 2]
+    ] * weight[:, 0]
+    c0 = c00 * (1 - weight[:, 1]) + c10 * weight[:, 1]
+    c1 = c01 * (1 - weight[:, 1]) + c11 * weight[:, 1]
+    sampled[valid] = c0 * (1 - weight[:, 2]) + c1 * weight[:, 2]
+    return sampled
+
+
+def _grayscale(values: np.ndarray, display_range) -> np.ndarray:
+    low, high = display_range
+    scale = high - low if high > low else 1.0
+    intensity = np.clip((values - low) / scale, 0.0, 1.0)
+    intensity = np.nan_to_num(intensity, nan=0.0)
+    return np.repeat(intensity[:, None], 3, axis=1)
+
+
+def _anatomical_plane_axes(volume: CTVolume):
+    """Match voxel axes to left/right, anterior/posterior, and inferior/superior."""
+
+    directions = np.abs(volume.world_axes)
+    voxel_axes = max(
+        permutations(range(3)),
+        key=lambda assignment: sum(
+            directions[world_axis, voxel_axis]
+            for world_axis, voxel_axis in enumerate(assignment)
+        ),
+    )
+    return (
+        ("Axial", voxel_axes[2]),
+        ("Coronal", voxel_axes[1]),
+        ("Sagittal", voxel_axes[0]),
+    )
+
+
 @dataclass
 class RegionState:
     """All data and UI state belonging to one node-identifier namespace."""
@@ -104,14 +200,26 @@ class RegionState:
     warnings: List[str] = field(default_factory=list)
 
 
+@dataclass
+class CTSliceState:
+    name: str
+    axis: int
+    index: int
+    structure: object
+    base_vertices: np.ndarray
+    transform: np.ndarray
+    visible: bool = False
+    transform_gizmo: bool = False
+
+
 class LungVizApplication:
     def __init__(self) -> None:
         self.regions: List[RegionState] = []
         self.selected_region_index = 0
         self._next_region_key = 1
         self.ct_volume: CTVolume | None = None
-        self.ct_structure = None
-        self.slice_planes: List[object] = []
+        self.ct_slices: List[CTSliceState] = []
+        self.selected_ct_slice_index = 0
         self.message = "Load each mesh or standalone node set as its own region."
 
     @property
@@ -186,7 +294,16 @@ class LungVizApplication:
         self.regions.append(region)
         self.selected_region_index = len(self.regions) - 1
         self._register_region(region)
-        if len(set(group_names)) > 1:
+        namespace_group_names = [
+            document.group_name
+            for document in region.node_documents
+            if document.group_name
+        ] + [
+            document.group_name
+            for document in region.element_documents
+            if document.group_name and any(element.node_ids for element in document.elements)
+        ]
+        if len(set(namespace_group_names)) > 1:
             region.warnings.append(
                 "The selected files declare multiple group names. They are isolated from "
                 "other loads, but load each intended region separately for fully independent IDs."
@@ -291,9 +408,7 @@ class LungVizApplication:
                         field_name, _finite_for_display(values), enabled=False
                     )
                 for field_name, values in edge_scalar_variants(mesh).items():
-                    display_name = field_name
-                    if display_name in region.scalar_values:
-                        display_name = f"{field_name} [elements]"
+                    display_name = f"{field_name} [elements]"
                     region.scalar_values[display_name] = values
                     region.scalar_locations[display_name] = "edges"
                     network.add_scalar_quantity(
@@ -393,6 +508,21 @@ class LungVizApplication:
         region.scalar_index = min(
             region.scalar_index, max(0, len(region.scalar_options) - 1)
         )
+        if region.network is not None and region.scalar_index == 0:
+            for preferred_location in ("edges", "nodes"):
+                matching_index = next(
+                    (
+                        index
+                        for index, field_name in enumerate(region.scalar_options)
+                        if "flow" in field_name.lower()
+                        and region.scalar_locations.get(field_name) == preferred_location
+                    ),
+                    None,
+                )
+                if matching_index is not None:
+                    region.scalar_index = matching_index
+                    self._set_scalar(region)
+                    break
         region.radius_index = min(region.radius_index, len(region.radius_options) - 1)
         if region.network is not None and region.radius_index == 0:
             for preferred_location in ("edges", "nodes"):
@@ -416,11 +546,6 @@ class LungVizApplication:
                 structure.set_transform(region.transform)
             except AttributeError:
                 pass
-            for plane in self.slice_planes:
-                try:
-                    structure.set_ignore_slice_plane(plane.get_name(), True)
-                except AttributeError:
-                    pass
         self._set_region_gizmo(region, region.transform_gizmo)
 
     def _set_region_gizmo(self, region: RegionState, enabled: bool) -> None:
@@ -491,74 +616,103 @@ class LungVizApplication:
         self.message = f"Removed region {region.name!r}."
 
     def _remove_ct(self) -> None:
-        for plane in self.slice_planes:
+        for slice_state in self.ct_slices:
             try:
-                plane.remove()
+                slice_state.structure.remove()
             except (AttributeError, RuntimeError):
                 pass
-        self.slice_planes.clear()
-        if self.ct_structure is not None:
-            try:
-                self.ct_structure.remove()
-            except (AttributeError, RuntimeError):
-                pass
-        self.ct_structure = None
+        self.ct_slices.clear()
+        self.ct_volume = None
 
     def load_ct(self, volume: CTVolume) -> None:
-        import polyscope as ps
-
         self._remove_ct()
         self.ct_volume = volume
-        self.ct_structure = ps.register_volume_grid(
-            f"CT / {volume.name}",
-            volume.values.shape,
-            (0.0, 0.0, 0.0),
-            volume.bound_high,
-            edge_width=0.0,
-        )
-        self.ct_structure.set_transform(volume.transform)
-        self.ct_structure.add_scalar_quantity(
-            "CT intensity",
-            volume.values,
-            defined_on="nodes",
-            enabled=True,
-            cmap="blues",
-            vminmax=volume.display_range,
-        )
         self.reset_ct_planes()
-        self.message = f"Loaded CT volume {volume.name!r}."
+        self.message = f"Loaded CT {volume.name!r}; enable the slices you want to inspect."
+
+    def unload_ct(self) -> None:
+        if self.ct_volume is None:
+            return
+        name = self.ct_volume.name
+        self._remove_ct()
+        self.message = f"Unloaded CT {name!r}."
+
+    def _update_ct_slice(self, slice_state: CTSliceState) -> None:
+        if self.ct_volume is None:
+            return
+        values = _sample_volume(
+            self.ct_volume, slice_state.base_vertices, slice_state.transform
+        )
+        slice_state.structure.update_vertex_positions(slice_state.base_vertices)
+        slice_state.structure.add_color_quantity(
+            "CT grayscale",
+            _grayscale(values, self.ct_volume.display_range),
+            defined_on="vertices",
+            enabled=True,
+        )
+
+    def _sync_ct_slice_transforms(self) -> None:
+        if self.ct_volume is None:
+            return
+        for slice_state in self.ct_slices:
+            try:
+                transform = np.asarray(slice_state.structure.get_transform(), dtype=float)
+            except AttributeError:
+                continue
+            if transform.shape == (4, 4) and not np.allclose(
+                transform, slice_state.transform
+            ):
+                slice_state.transform = transform
+                self._update_ct_slice(slice_state)
+
+    def _set_ct_slice_gizmo(self, selected_index: int, enabled: bool) -> None:
+        for index, slice_state in enumerate(self.ct_slices):
+            active = enabled and index == selected_index
+            slice_state.transform_gizmo = active
+            try:
+                slice_state.structure.set_transform_gizmo_enabled(active)
+            except AttributeError:
+                pass
+        if enabled and self.ct_slices:
+            selected = self.ct_slices[selected_index]
+            selected.visible = True
+            selected.structure.set_enabled(True)
 
     def reset_ct_planes(self) -> None:
         import polyscope as ps
 
         if self.ct_volume is None:
             return
-        for plane in self.slice_planes:
+        for slice_state in self.ct_slices:
             try:
-                plane.remove()
+                slice_state.structure.remove()
             except (AttributeError, RuntimeError):
                 pass
-        self.slice_planes.clear()
-        for axis_index, color in enumerate(
-            ((0.9, 0.25, 0.25), (0.25, 0.9, 0.25), (0.25, 0.45, 0.95))
-        ):
-            plane = ps.add_scene_slice_plane()
-            plane.set_pose(
-                self.ct_volume.center_world,
-                self.ct_volume.world_axes[:, axis_index],
+        self.ct_slices.clear()
+        self.selected_ct_slice_index = 0
+        for name, axis in _anatomical_plane_axes(self.ct_volume):
+            index = self.ct_volume.values.shape[axis] // 2
+            vertices, faces = _slice_geometry(self.ct_volume, axis, index)
+            structure = ps.register_surface_mesh(
+                f"CT / {self.ct_volume.name} / {name}",
+                vertices,
+                faces,
+                enabled=False,
+                edge_width=0.0,
+                smooth_shade=False,
+                back_face_policy="identical",
             )
-            plane.set_draw_plane(True)
-            plane.set_draw_widget(True)
-            plane.set_grid_line_color(color)
-            plane.set_transparency(0.18)
-            self.slice_planes.append(plane)
-        for region in self.regions:
-            for structure in region.structures:
-                for plane in self.slice_planes:
-                    try:
-                        structure.set_ignore_slice_plane(plane.get_name(), True)
-                    except AttributeError:
-                        pass
+            structure.set_transform(self.ct_volume.transform)
+            slice_state = CTSliceState(
+                name=name,
+                axis=axis,
+                index=index,
+                structure=structure,
+                base_vertices=vertices,
+                transform=np.asarray(self.ct_volume.transform, dtype=float).copy(),
+            )
+            self._update_ct_slice(slice_state)
+            self.ct_slices.append(slice_state)
 
     def clear(self) -> None:
         import polyscope as ps
@@ -634,12 +788,12 @@ class LungVizApplication:
                 self._register_region(region)
         if region.scalar_options:
             changed, value = psim.Combo(
-                "Colour field", region.scalar_index, region.scalar_options
+                "Colour by", region.scalar_index, region.scalar_options
             )
             if changed:
                 region.scalar_index = value
                 self._set_scalar(region)
-            if psim.Button("Show selected field"):
+            if psim.Button("Apply colour field"):
                 self._set_scalar(region)
             selected = region.scalar_values[region.scalar_options[region.scalar_index]]
             finite = selected[np.isfinite(selected)]
@@ -648,11 +802,18 @@ class LungVizApplication:
 
             if region.network is not None:
                 changed, value = psim.Combo(
-                    "Radius field", region.radius_index, region.radius_options
+                    "Tube radius", region.radius_index, region.radius_options
                 )
                 if changed:
                     region.radius_index = value
                     self._set_radius(region)
+                psim.TextWrapped(
+                    "Colour maps values without changing geometry. Tube radius changes "
+                    "thickness independently. Fields marked [elements] belong to vessel "
+                    "segments; unmarked fields belong to nodes. Flow uses a linear colour "
+                    "range, adjustable in Polyscope's Scene panel. Radius remains in the "
+                    "same physical units as the mesh coordinates."
+                )
 
         if region.warnings and psim.TreeNode("Import warnings"):
             for warning in region.warnings:
@@ -689,11 +850,54 @@ class LungVizApplication:
             psim.TextUnformatted(
                 "Spacing: " + " x ".join(f"{value:.4g}" for value in volume.spacing)
             )
-            if psim.Button("Reset three CT planes"):
+            if psim.Button("Reset CT slices"):
                 self.reset_ct_planes()
+            psim.SameLine()
+            if psim.Button("Unload CT"):
+                self.unload_ct()
+                return
+
+            for slice_state in self.ct_slices:
+                changed, visible = psim.Checkbox(
+                    f"Show {slice_state.name}", slice_state.visible
+                )
+                if changed:
+                    slice_state.visible = visible
+                    slice_state.structure.set_enabled(visible)
+                changed, index = psim.SliderInt(
+                    f"{slice_state.name} slice",
+                    slice_state.index,
+                    0,
+                    volume.values.shape[slice_state.axis] - 1,
+                )
+                if changed:
+                    slice_state.index = index
+                    slice_state.base_vertices, _faces = _slice_geometry(
+                        volume, slice_state.axis, index
+                    )
+                    self._update_ct_slice(slice_state)
+
+            if self.ct_slices:
+                changed, selected_index = psim.Combo(
+                    "Plane to rotate",
+                    self.selected_ct_slice_index,
+                    [slice_state.name for slice_state in self.ct_slices],
+                )
+                if changed:
+                    self._set_ct_slice_gizmo(self.selected_ct_slice_index, False)
+                    self.selected_ct_slice_index = selected_index
+                selected = self.ct_slices[self.selected_ct_slice_index]
+                changed, enabled = psim.Checkbox(
+                    "Plane transform gizmo", selected.transform_gizmo
+                )
+                if changed:
+                    self._set_ct_slice_gizmo(
+                        self.selected_ct_slice_index, enabled
+                    )
             psim.TextWrapped(
-                "Use each coloured plane widget to translate or rotate its slice. "
-                "Enable a region's alignment gizmo if its coordinate frame needs adjustment."
+                "The three slices start hidden. Use the sliders to move through native "
+                "axial, coronal, and sagittal sections. The transform gizmo can translate "
+                "or rotate one selected plane and the grayscale image is resampled."
             )
             if volume.warnings and psim.TreeNode("CT warnings"):
                 for warning in volume.warnings:
@@ -704,6 +908,7 @@ class LungVizApplication:
         import polyscope.imgui as psim
 
         self._sync_region_transforms()
+        self._sync_ct_slice_transforms()
         psim.TextUnformatted("LungViZ")
         psim.TextWrapped(self.message)
         psim.SeparatorText("EX regions")

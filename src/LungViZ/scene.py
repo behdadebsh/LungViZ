@@ -283,16 +283,10 @@ def build_mesh_scene(
     for field_name, values_by_element in element_field_values.items():
         field_ids = set(values_by_element)
         missing_field_ids = drawable_element_ids - field_ids
-        unmatched_field_ids = field_ids - drawable_element_ids
         if missing_field_ids:
             warnings.append(
                 f"Element field {field_name!r} has no value for "
                 f"{len(missing_field_ids)} connected element(s)"
-            )
-        if unmatched_field_ids:
-            warnings.append(
-                f"Element field {field_name!r} contains {len(unmatched_field_ids)} value(s) "
-                "whose identifiers are not present in this mesh connectivity"
             )
 
     fields = {

@@ -20,7 +20,8 @@ Features
 * Overlay ``.exdata`` locations and their fields as point clouds.
 * Display standalone ``.exnode`` regions as independent point clouds.
 * Load a DICOM series folder or NIfTI CT volume using patient/world coordinates.
-* Inspect CT intensity with three initially orthogonal, translatable and rotatable slice planes.
+* Inspect CT intensity on grayscale axial, coronal, and sagittal planes without drawing a solid volume.
+* Show, hide, slide, translate, or rotate each CT plane independently, or unload the CT.
 * Interactively transform a mesh region to align it with the CT when coordinate frames differ.
 * Continue using Polyscope's native picking, camera, screenshot, colour-map, and structure controls.
 
@@ -64,21 +65,25 @@ If the coordinate and connectivity files are selected at different times, use
 **Add files to region...** for the second selection. An exnode-only region is
 shown as a point cloud.
 
-Use **Colour field** and **Radius field** for the most common field
+Use **Colour by** and **Tube radius** for the most common field
 visualisations. The standard Polyscope Scene panel exposes every imported
 quantity, including node and element identifiers, for detailed inspection.
-Element fields are registered on network edges; if an element and nodal field
-have the same name, the element version is labelled ``[elements]``. A field
+Element fields are registered on network edges and labelled ``[elements]``. A field
 whose name contains ``radius`` is applied automatically, preferring an element
 radius when both associations are available. Select ``Constant`` to return to
-uniform thickness.
+uniform thickness. Colour only changes the selected colour map; tube radius is
+an independent geometric control. Flow is mapped linearly over its data range,
+which can be adjusted in Polyscope's Scene panel.
 
 For CT data, choose **Load DICOM folder...** or **Load NIfTI...**. DICOM pixel
 values are converted with their rescale slope/intercept, normally yielding
 Hounsfield units. Image orientation, origin, and voxel spacing are retained.
-The three coloured planes start at the volume centre; their Polyscope widgets
-can translate and rotate them independently. If an EX mesh is in a different
-coordinate frame, enable its **Alignment transform gizmo**.
+The three grayscale planes start at the volume centre and are hidden by default.
+Enable only the views you need, move native slices with their sliders, or use
+the selected plane's transform gizmo for an oblique view. Oblique images are
+trilinearly resampled as the plane moves. **Unload CT** removes all three planes.
+If an EX mesh is in a different coordinate frame, enable its **Alignment
+transform gizmo**.
 
 The reader consumes derivative and version parameters correctly. Cubic Hermite
 1D coordinate fields are sampled using their first nodal derivatives and
@@ -87,7 +92,8 @@ Other fields display their primary nodal values and are linearly interpolated
 over the rendered centreline. Grid-based element fields retain their element
 association. Their samples are averaged within each element for edge colour and
 radius display; this is exact for element files that repeat one constant value
-at both xi endpoints. Non-1D elements are reported and skipped.
+at both xi endpoints. Field values for element identifiers outside the loaded
+connectivity are ignored. Non-1D elements are reported and skipped.
 For compressed DICOM transfer syntaxes, pydicom may request an optional pixel
 decoder such as pylibjpeg.
 

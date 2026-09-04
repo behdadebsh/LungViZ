@@ -110,6 +110,9 @@ Element: 2 0 0
 Element: 3 0 0
  Values:
   40 40 0.10 0.10
+Element: 999 0 0
+ Values:
+  20 20 0.05 0.05
 """,
         encoding="utf-8",
     )
@@ -124,3 +127,4 @@ Element: 3 0 0
         scene.edge_fields["radius_perf"].values[:, 0], [0.30, 0.20, 0.10]
     )
     np.testing.assert_allclose(edge_scalar_variants(scene)["flow"], [100, 60, 40])
+    assert not any("not present" in warning for warning in scene.warnings)

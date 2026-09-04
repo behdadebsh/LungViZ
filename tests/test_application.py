@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from LungViZ.application import LungVizApplication
+from LungViZ.application import (
+    LungVizApplication,
+    _anatomical_plane_axes,
+    _sample_volume,
+    _slice_geometry,
+)
 from LungViZ.model import MeshScene, PointScene
 from LungViZ.volume import CTVolume
 
@@ -15,13 +20,16 @@ EXAMPLES = Path(__file__).parents[1] / "examples"
 class FakeStructure:
     def __init__(self):
         self.scalars = {}
+        self.colors = {}
         self.vectors = {}
         self.radius_quantity = None
         self.edge_radius_quantity = None
         self.removed = False
         self.gizmo_enabled = False
         self.transform = np.eye(4)
-        self.ignored_planes = []
+        self.enabled = True
+        self.vertices = None
+        self.faces = None
 
     def add_scalar_quantity(self, name, values, **options):
         self.scalars[name] = (values, options)
@@ -30,6 +38,16 @@ class FakeStructure:
     def add_vector_quantity(self, name, values, **options):
         self.vectors[name] = (values, options)
         return SimpleNamespace()
+
+    def add_color_quantity(self, name, values, **options):
+        self.colors[name] = (np.asarray(values), options)
+        return SimpleNamespace()
+
+    def update_vertex_positions(self, vertices):
+        self.vertices = np.asarray(vertices)
+
+    def set_enabled(self, enabled):
+        self.enabled = enabled
 
     def set_node_radius_quantity(self, name, autoscale=True):
         self.radius_quantity = (name, autoscale)
@@ -55,42 +73,6 @@ class FakeStructure:
     def get_transform(self):
         return self.transform
 
-    def set_ignore_slice_plane(self, name, ignored):
-        if ignored:
-            self.ignored_planes.append(name)
-
-
-class FakePlane:
-    next_id = 1
-
-    def __init__(self):
-        self.pose = None
-        self.removed = False
-        self.name = f"plane-{FakePlane.next_id}"
-        FakePlane.next_id += 1
-
-    def set_pose(self, position, normal):
-        self.pose = (np.asarray(position), np.asarray(normal))
-
-    def set_draw_plane(self, enabled):
-        pass
-
-    def set_draw_widget(self, enabled):
-        pass
-
-    def set_grid_line_color(self, color):
-        pass
-
-    def set_transparency(self, value):
-        pass
-
-    def remove(self):
-        self.removed = True
-
-    def get_name(self):
-        return self.name
-
-
 class FakePolyscope:
     def __init__(self):
         self.structures = {}
@@ -108,13 +90,13 @@ class FakePolyscope:
         self.structures[name] = structure
         return structure
 
-    def register_volume_grid(self, name, dimensions, low, high, **options):
+    def register_surface_mesh(self, name, vertices, faces, **options):
         structure = FakeStructure()
+        structure.vertices = np.asarray(vertices)
+        structure.faces = np.asarray(faces)
+        structure.enabled = options.get("enabled", True)
         self.structures[name] = structure
         return structure
-
-    def add_scene_slice_plane(self):
-        return FakePlane()
 
 
 def test_application_loads_mesh_data_and_visual_quantities(monkeypatch):
@@ -220,12 +202,14 @@ Element: 3 0 0
 
     assert region.scalar_locations["flow [elements]"] == "edges"
     assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"
-    assert region.radius_options[region.radius_index] == "radius_perf"
-    assert region.network.edge_radius_quantity == ("radius: radius_perf", False)
-
-    region.scalar_index = region.scalar_options.index("flow [elements]")
-    app._set_scalar(region)
+    assert region.scalar_options[region.scalar_index] == "flow [elements]"
     assert region.network.scalars["flow [elements]"][1]["enabled"]
+    assert region.radius_options[region.radius_index] == "radius_perf [elements]"
+    assert region.network.edge_radius_quantity == (
+        "radius: radius_perf [elements]",
+        False,
+    )
+
     assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"
 
 
@@ -249,10 +233,78 @@ def test_ct_volume_registers_world_transform_and_three_planes(monkeypatch, tmp_p
 
     app.load_ct(volume)
 
-    assert "CT / scan" in fake.structures
-    assert len(app.slice_planes) == 3
-    np.testing.assert_allclose(app.ct_structure.transform, transform)
-    np.testing.assert_allclose(app.slice_planes[0].pose[0], [11, 23, 36])
-    np.testing.assert_allclose(app.slice_planes[0].pose[1], [1, 0, 0])
+    assert "CT / scan / Axial" in fake.structures
+    assert "CT / scan / Coronal" in fake.structures
+    assert "CT / scan / Sagittal" in fake.structures
+    assert len(app.ct_slices) == 3
+    assert [slice_state.name for slice_state in app.ct_slices] == [
+        "Axial",
+        "Coronal",
+        "Sagittal",
+    ]
+    assert all(not slice_state.visible for slice_state in app.ct_slices)
+    assert all(not slice_state.structure.enabled for slice_state in app.ct_slices)
+    axial = app.ct_slices[0]
+    np.testing.assert_allclose(axial.structure.transform, transform)
+    np.testing.assert_allclose(axial.base_vertices[:, 2], 6.0)
+    colors = axial.structure.colors["CT grayscale"][0]
+    np.testing.assert_allclose(colors[:, 0], colors[:, 1])
+    np.testing.assert_allclose(colors[:, 1], colors[:, 2])
     assert len(app.regions) == 1
-    assert len(region.network.ignored_planes) == 3
+
+    app._set_ct_slice_gizmo(0, True)
+    assert axial.visible
+    assert axial.structure.enabled
+    assert axial.transform_gizmo
+
+    structures = [slice_state.structure for slice_state in app.ct_slices]
+    app.unload_ct()
+    assert app.ct_volume is None
+    assert app.ct_slices == []
+    assert all(structure.removed for structure in structures)
+
+
+def test_ct_slice_sampling_tracks_translated_and_rotated_plane(tmp_path):
+    grid = np.indices((3, 4, 5), dtype=float)
+    values = grid[0] + 10 * grid[1] + 100 * grid[2]
+    volume = CTVolume(
+        name="gradient",
+        source=tmp_path,
+        values=values,
+        spacing=np.ones(3),
+        transform=np.eye(4),
+        display_range=(0.0, 500.0),
+    )
+    vertices, _faces = _slice_geometry(volume, axis=2, index=2)
+
+    sampled = _sample_volume(volume, vertices, np.eye(4))
+    np.testing.assert_allclose(sampled, values[:, :, 2].ravel())
+
+    translated = np.eye(4)
+    translated[0, 3] = 0.5
+    sampled = _sample_volume(volume, vertices, translated)
+    valid = vertices[:, 0] < 2
+    np.testing.assert_allclose(
+        sampled[valid], values[:, :, 2].ravel()[valid] + 0.5
+    )
+
+
+def test_anatomical_plane_names_follow_permuted_volume_axes(tmp_path):
+    transform = np.eye(4)
+    transform[:3, :3] = np.asarray(
+        [[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float
+    )
+    volume = CTVolume(
+        name="permuted",
+        source=tmp_path,
+        values=np.zeros((2, 3, 4)),
+        spacing=np.ones(3),
+        transform=transform,
+        display_range=(0.0, 1.0),
+    )
+
+    assert _anatomical_plane_axes(volume) == (
+        ("Axial", 1),
+        ("Coronal", 0),
+        ("Sagittal", 2),
+    )

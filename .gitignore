@@ -27,6 +27,9 @@
 *.out
 *.app
 
+# Temp_files
+*.ini
+
 # OS X
 .DS_Store
 

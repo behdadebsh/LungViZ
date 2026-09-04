@@ -61,8 +61,10 @@ def _read_lines(path: Path) -> List[str]:
 
 def _parse_field_header(
     lines: Sequence[str], start: int, field_count: int
-) -> Tuple[Dict[str, FieldDefinition], int]:
+) -> Tuple[Dict[str, FieldDefinition], int, List[str]]:
     fields: Dict[str, FieldDefinition] = {}
+    warnings: List[str] = []
+    occupied_value_indices: set[int] = set()
     cursor = start
     for _ in range(field_count):
         while cursor < len(lines) and not _FIELD_RE.match(lines[cursor]):
@@ -88,12 +90,38 @@ def _parse_field_header(
             assert component_match is not None
             component_name, value_index, derivatives, suffix = component_match.groups()
             versions_match = _VERSIONS_RE.search(suffix)
+            derivative_count = int(derivatives)
+            version_count = int(versions_match.group(1)) if versions_match else 1
+            declared_value_index = int(value_index) - 1
+            parameter_count = (1 + derivative_count) * version_count
+            parameter_indices = set(
+                range(declared_value_index, declared_value_index + parameter_count)
+            )
+
+            # Some EX exporters write ``Value index=1`` independently for every
+            # component, even though the following node record is a flat x/y/z
+            # value list. Value indices in a node header are global, so overlapping
+            # ranges cannot describe distinct component parameters. Recover these
+            # files by laying only the conflicting component out after the values
+            # already assigned in declaration order.
+            resolved_value_index = declared_value_index
+            if occupied_value_indices.intersection(parameter_indices):
+                resolved_value_index = max(occupied_value_indices, default=-1) + 1
+                parameter_indices = set(
+                    range(resolved_value_index, resolved_value_index + parameter_count)
+                )
+                warnings.append(
+                    f"Component {name.strip()}.{component_name.strip()} repeats or overlaps "
+                    f"Value index {declared_value_index + 1}; interpreted it as "
+                    f"Value index {resolved_value_index + 1}"
+                )
+            occupied_value_indices.update(parameter_indices)
             components.append(
                 ComponentDefinition(
                     name=component_name.strip(),
-                    value_index=int(value_index) - 1,
-                    derivatives=int(derivatives),
-                    versions=int(versions_match.group(1)) if versions_match else 1,
+                    value_index=resolved_value_index,
+                    derivatives=derivative_count,
+                    versions=version_count,
                 )
             )
             cursor += 1
@@ -104,7 +132,7 @@ def _parse_field_header(
             components=tuple(components),
         )
         fields[definition.name] = definition
-    return fields, cursor
+    return fields, cursor, warnings
 
 
 def _numeric_values(lines: Iterable[str]) -> List[float]:
@@ -143,10 +171,11 @@ def parse_exnode(path: str | Path, *, is_data: bool | None = None) -> NodeDocume
 
         fields_match = re.match(r"^\s*#Fields\s*=\s*(\d+)", line, re.IGNORECASE)
         if fields_match:
-            active_fields, cursor = _parse_field_header(
+            active_fields, cursor, header_warnings = _parse_field_header(
                 lines, cursor + 1, int(fields_match.group(1))
             )
             document.fields.update(active_fields)
+            document.warnings.extend(header_warnings)
             continue
 
         node_match = _NODE_RE.match(line)

@@ -44,6 +44,35 @@ Node: 7
     assert document.nodes[0].fields["signal"][0] == pytest.approx(12.5)
 
 
+def test_duplicate_component_value_indices_are_laid_out_sequentially(tmp_path):
+    path = tmp_path / "repeated_indices.exnode"
+    path.write_text(
+        """Group name: exported_tree
+#Fields=1
+1) coordinates, coordinate, rectangular cartesian, #Components=3
+ x. Value index=1, #Derivatives=0
+ y. Value index=1, #Derivatives=0
+ z. Value index=1, #Derivatives=0
+Node: 1
+ 32.5 -201.7 1335.9
+Node: 2
+ 25.5 -200.5 1348.2
+""",
+        encoding="utf-8",
+    )
+
+    document = parse_exnode(path)
+
+    np.testing.assert_allclose(
+        document.nodes[0].fields["coordinates"], [32.5, -201.7, 1335.9]
+    )
+    assert [
+        component.value_index for component in document.fields["coordinates"].components
+    ] == [0, 1, 2]
+    assert len(document.warnings) == 2
+    assert "coordinates.y" in document.warnings[0]
+
+
 def test_parse_exelem_connectivity():
     document = parse_exelem(EXAMPLES / "sample.exelem")
 
@@ -59,4 +88,3 @@ def test_node_without_field_header_is_rejected(tmp_path):
 
     with pytest.raises(ExFileError, match="no preceding #Fields"):
         parse_exnode(path)
-

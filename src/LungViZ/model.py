@@ -40,6 +40,7 @@ class FieldDefinition:
 class NodeRecord:
     identifier: int
     fields: Dict[str, np.ndarray]
+    derivatives: Dict[str, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass
@@ -57,6 +58,8 @@ class ElementRecord:
     identifier: Tuple[int, int, int]
     dimension: int
     node_ids: Tuple[int, ...]
+    interpolation: str = "linear"
+    scale_factors: Tuple[float, ...] = ()
 
     @property
     def display_identifier(self) -> int:
@@ -86,5 +89,14 @@ class MeshScene:
     edge_element_ids: np.ndarray
     fields: Dict[str, SceneField]
     coordinate_field: str
+    original_node_count: int = 0
     warnings: List[str] = field(default_factory=list)
 
+
+@dataclass
+class PointScene:
+    coordinates: np.ndarray
+    node_ids: np.ndarray
+    fields: Dict[str, SceneField]
+    coordinate_field: str
+    warnings: List[str] = field(default_factory=list)

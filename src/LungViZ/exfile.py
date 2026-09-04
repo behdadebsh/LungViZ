@@ -191,12 +191,28 @@ def parse_exnode(path: str | Path, *, is_data: bool | None = None) -> NodeDocume
             )
 
         node_fields: Dict[str, np.ndarray] = {}
+        node_derivatives: Dict[str, np.ndarray] = {}
         for name, definition in active_fields.items():
             node_fields[name] = np.asarray(
                 [values[component.value_index] for component in definition.components],
                 dtype=float,
             )
-        document.nodes.append(NodeRecord(identifier=node_id, fields=node_fields))
+            node_derivatives[name] = np.asarray(
+                [
+                    values[component.value_index + 1]
+                    if component.derivatives >= 1
+                    else np.nan
+                    for component in definition.components
+                ],
+                dtype=float,
+            )
+        document.nodes.append(
+            NodeRecord(
+                identifier=node_id,
+                fields=node_fields,
+                derivatives=node_derivatives,
+            )
+        )
 
     if not document.nodes:
         raise ExFileError(f"No Node records found in {source.name}")
@@ -210,6 +226,8 @@ def parse_exelem(path: str | Path) -> ElementDocument:
     lines = _read_lines(source)
     document = ElementDocument(path=source)
     dimension = 0
+    declared_node_count: int | None = None
+    uses_cubic_hermite = False
     cursor = 0
     while cursor < len(lines):
         line = lines[cursor]
@@ -219,6 +237,13 @@ def parse_exelem(path: str | Path) -> ElementDocument:
         shape_match = _SHAPE_RE.search(line)
         if shape_match:
             dimension = int(shape_match.group(1))
+            declared_node_count = None
+            uses_cubic_hermite = False
+        node_count_match = re.match(r"^\s*#Nodes\s*=\s*(\d+)", line, re.IGNORECASE)
+        if node_count_match:
+            declared_node_count = int(node_count_match.group(1))
+        if re.search(r"(?:c\.|cubic\s+)Hermite", line, re.IGNORECASE):
+            uses_cubic_hermite = True
 
         element_match = _ELEMENT_RE.match(line)
         if not element_match:
@@ -228,13 +253,18 @@ def parse_exelem(path: str | Path) -> ElementDocument:
         identifier = tuple(int(value) for value in element_match.groups())
         cursor += 1
         nodes: List[int] = []
+        scale_factors: List[float] = []
         while cursor < len(lines):
             candidate = lines[cursor]
             if _ELEMENT_RE.match(candidate) or _SHAPE_RE.search(candidate) or _GROUP_RE.match(candidate):
                 break
-            if re.match(r"^\s*Nodes\s*:\s*$", candidate, re.IGNORECASE):
+            nodes_match = re.match(r"^\s*Nodes\s*:\s*(.*?)\s*$", candidate, re.IGNORECASE)
+            if nodes_match:
+                nodes.extend(int(token) for token in _INT_RE.findall(nodes_match.group(1)))
                 cursor += 1
                 while cursor < len(lines):
+                    if declared_node_count and len(nodes) >= declared_node_count:
+                        break
                     node_line = lines[cursor]
                     if (
                         _ELEMENT_RE.match(node_line)
@@ -249,13 +279,47 @@ def parse_exelem(path: str | Path) -> ElementDocument:
                         break
                     nodes.extend(int(token) for token in _INT_RE.findall(node_line))
                     cursor += 1
+                    if declared_node_count and len(nodes) >= declared_node_count:
+                        break
+                continue
+            factors_match = re.match(
+                r"^\s*Scale factors\s*:\s*(.*?)\s*$", candidate, re.IGNORECASE
+            )
+            if factors_match:
+                scale_factors.extend(_numeric_values([factors_match.group(1)]))
+                cursor += 1
+                while cursor < len(lines):
+                    factor_line = lines[cursor]
+                    if (
+                        _ELEMENT_RE.match(factor_line)
+                        or _SHAPE_RE.search(factor_line)
+                        or _GROUP_RE.match(factor_line)
+                        or re.match(r"^\s*(?:Nodes|Values|Faces)\s*:", factor_line, re.IGNORECASE)
+                    ):
+                        break
+                    scale_factors.extend(_numeric_values([factor_line]))
+                    cursor += 1
                 continue
             cursor += 1
 
+        if declared_node_count and len(nodes) > declared_node_count:
+            document.warnings.append(
+                f"Element {identifier}: ignored {len(nodes) - declared_node_count} "
+                "extra node identifier(s)"
+            )
+            nodes = nodes[:declared_node_count]
+        if declared_node_count and nodes and len(nodes) < declared_node_count:
+            document.warnings.append(
+                f"Element {identifier}: expected {declared_node_count} nodes but found {len(nodes)}"
+            )
         if nodes:
             document.elements.append(
                 ElementRecord(
-                    identifier=identifier, dimension=dimension, node_ids=tuple(nodes)
+                    identifier=identifier,
+                    dimension=dimension,
+                    node_ids=tuple(nodes),
+                    interpolation="cubic_hermite" if uses_cubic_hermite else "linear",
+                    scale_factors=tuple(scale_factors),
                 )
             )
         elif dimension == 1:
@@ -280,4 +344,3 @@ def load_ex_file(path: str | Path) -> NodeDocument | ElementDocument:
     raise ExFileError(
         f"Unsupported extension {source.suffix!r}; choose .exnode, .exelem, or .exdata"
     )
-

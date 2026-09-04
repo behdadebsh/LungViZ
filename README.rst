@@ -3,19 +3,24 @@
 LungViZ
 ***************
 
-LungViZ is an interactive viewer for one-dimensional OpenCMISS/CMGUI meshes.
-It reads ``.exnode`` coordinates and nodal fields, ``.exelem`` connectivity,
-and ``.exdata`` point data, then displays them in a Polyscope window.
+LungViZ is an interactive viewer for regional one-dimensional OpenCMISS/CMGUI
+meshes and medical image volumes. It displays ``.exnode``, ``.exelem``, and
+``.exdata`` data together with DICOM or NIfTI CT images in a Polyscope window.
 
 Features
 --------
 
-* Load several EX files at once with a native file picker or as command-line arguments.
+* Load each EX mesh or node set into an isolated region with its own identifier namespace.
+* Add files to an existing region when its exnode and exelem files are selected separately.
 * Inspect original node and element identifiers and 1D connectivity.
 * Colour a network by any scalar field, vector component, or vector magnitude.
 * Use a non-negative field such as radius to control the displayed network thickness.
 * Display multi-component fields as Polyscope vectors.
 * Overlay ``.exdata`` locations and their fields as point clouds.
+* Display standalone ``.exnode`` regions as independent point clouds.
+* Load a DICOM series folder or NIfTI CT volume using patient/world coordinates.
+* Inspect CT intensity with three initially orthogonal, translatable and rotatable slice planes.
+* Interactively transform a mesh region to align it with the CT when coordinate frames differ.
 * Continue using Polyscope's native picking, camera, screenshot, colour-map, and structure controls.
 
 Installation
@@ -51,15 +56,31 @@ Or try the included small branching airway example::
 Usage notes
 -----------
 
-Click **Load EX files...** in the LungViZ panel and select matching files. A
-mesh becomes visible when both coordinate nodes and 1D element connectivity
-are loaded. Use **Colour field** and **Radius field** for the most common
+Click **Load EX as new region...** and select the files belonging to one mesh.
+Every new-region operation creates a separate node-number namespace, so another
+exnode file containing the same node identifiers cannot overwrite that mesh.
+If the coordinate and connectivity files are selected at different times, use
+**Add files to region...** for the second selection. An exnode-only region is
+shown as a point cloud.
+
+Use **Colour field** and **Radius field** for the most common field
 visualisations. The standard Polyscope Scene panel exposes every imported
 quantity, including node and element identifiers, for detailed inspection.
 
-The reader consumes derivative and version parameters correctly but displays
-the primary nodal value for each component. It does not evaluate finite-element
-basis functions between nodes. Non-1D elements are reported and skipped.
+For CT data, choose **Load DICOM folder...** or **Load NIfTI...**. DICOM pixel
+values are converted with their rescale slope/intercept, normally yielding
+Hounsfield units. Image orientation, origin, and voxel spacing are retained.
+The three coloured planes start at the volume centre; their Polyscope widgets
+can translate and rotate them independently. If an EX mesh is in a different
+coordinate frame, enable its **Alignment transform gizmo**.
+
+The reader consumes derivative and version parameters correctly. Cubic Hermite
+1D coordinate fields are sampled using their first nodal derivatives and
+element scale factors, so curved branches are not reduced to endpoint chords.
+Other fields display their primary nodal values and are linearly interpolated
+over the rendered centreline. Non-1D elements are reported and skipped.
+For compressed DICOM transfer syntaxes, pydicom may request an optional pixel
+decoder such as pylibjpeg.
 
 Development
 -----------

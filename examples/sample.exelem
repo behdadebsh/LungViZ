@@ -1,0 +1,19 @@
+Group name: sample_airway
+Shape. Dimension=1 line
+#Scale factor sets=0
+#Nodes=2
+#Fields=1
+1) coordinates, coordinate, rectangular cartesian, #Components=3
+ x. l.Lagrange, no modify, standard node based.
+ y. l.Lagrange, no modify, standard node based.
+ z. l.Lagrange, no modify, standard node based.
+Element: 1 0 0
+ Nodes:
+  1 2
+Element: 2 0 0
+ Nodes:
+  2 3
+Element: 3 0 0
+ Nodes:
+  2 4
+

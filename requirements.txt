@@ -1,0 +1,3 @@
+numpy>=1.23
+polyscope>=2.4
+

@@ -82,6 +82,35 @@ def test_parse_exelem_connectivity():
     assert document.elements[1].node_ids == (2, 3)
 
 
+def test_parse_grid_based_element_field_values(tmp_path):
+    path = tmp_path / "flow.exelem"
+    path.write_text(
+        """Group name: perfusion
+Shape. Dimension=1
+#Scale factor sets=0
+#Nodes=0
+#Fields=1
+1)flow, field, rectangular cartesian, #Components=1
+ flow. l.Lagrange, no modify, grid based.
+ #xi1=1
+Element: 1 0 0
+ Values:
+  0.70000E+05 0.70000E+05
+Element: 2 0 0
+ Values:
+  10.0 14.0
+""",
+        encoding="utf-8",
+    )
+
+    document = parse_exelem(path)
+
+    assert document.fields["flow"].component_value_counts == (2,)
+    assert document.elements[0].node_ids == ()
+    np.testing.assert_allclose(document.elements[0].fields["flow"], [70000.0])
+    np.testing.assert_allclose(document.elements[1].fields["flow"], [12.0])
+
+
 def test_node_without_field_header_is_rejected(tmp_path):
     path = tmp_path / "bad.exnode"
     path.write_text("Group name: bad\nNode: 1\n 0 0 0\n", encoding="utf-8")

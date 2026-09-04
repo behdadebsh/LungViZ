@@ -17,6 +17,7 @@ class FakeStructure:
         self.scalars = {}
         self.vectors = {}
         self.radius_quantity = None
+        self.edge_radius_quantity = None
         self.removed = False
         self.gizmo_enabled = False
         self.transform = np.eye(4)
@@ -35,6 +36,12 @@ class FakeStructure:
 
     def clear_node_radius_quantity(self):
         self.radius_quantity = None
+
+    def set_edge_radius_quantity(self, name, autoscale=True):
+        self.edge_radius_quantity = (name, autoscale)
+
+    def clear_edge_radius_quantity(self):
+        self.edge_radius_quantity = None
 
     def set_transform_gizmo_enabled(self, enabled):
         self.gizmo_enabled = enabled
@@ -139,7 +146,7 @@ def test_application_loads_mesh_data_and_visual_quantities(monkeypatch):
 
     region.radius_index = region.radius_options.index("radius")
     app._set_radius(region)
-    assert region.network.radius_quantity == ("radius: radius", True)
+    assert region.network.radius_quantity == ("radius: radius", False)
 
 
 def test_regions_keep_repeated_node_identifiers_isolated(monkeypatch, tmp_path):
@@ -173,6 +180,53 @@ Node: 2
     np.testing.assert_array_equal(landmark_region.scene.node_ids, [1, 2])
     np.testing.assert_allclose(landmark_region.scene.coordinates[0], [100, 200, 300])
     np.testing.assert_allclose(mesh_region.scene.coordinates[0], [0, 0, 0])
+
+
+def test_element_flow_colours_edges_and_radius_controls_edge_thickness(
+    monkeypatch, tmp_path
+):
+    field_path = tmp_path / "per_element.exelem"
+    field_path.write_text(
+        """Group name: sample_airway
+Shape. Dimension=1
+#Scale factor sets=0
+#Nodes=0
+#Fields=2
+1)flow, field, rectangular cartesian, #Components=1
+ flow. l.Lagrange, no modify, grid based.
+ #xi1=1
+2)radius_perf, field, rectangular cartesian, #Components=1
+ radius_perf. l.Lagrange, no modify, grid based.
+ #xi1=1
+Element: 1 0 0
+ Values:
+  100 100 0.30 0.30
+Element: 2 0 0
+ Values:
+  60 60 0.20 0.20
+Element: 3 0 0
+ Values:
+  40 40 0.10 0.10
+""",
+        encoding="utf-8",
+    )
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+
+    region = app.load_region(
+        [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem", field_path]
+    )
+
+    assert region.scalar_locations["flow [elements]"] == "edges"
+    assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"
+    assert region.radius_options[region.radius_index] == "radius_perf"
+    assert region.network.edge_radius_quantity == ("radius: radius_perf", False)
+
+    region.scalar_index = region.scalar_options.index("flow [elements]")
+    app._set_scalar(region)
+    assert region.network.scalars["flow [elements]"][1]["enabled"]
+    assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"
 
 
 def test_ct_volume_registers_world_transform_and_three_planes(monkeypatch, tmp_path):

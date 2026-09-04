@@ -17,6 +17,7 @@ import numpy as np
 from .model import (
     ComponentDefinition,
     ElementDocument,
+    ElementFieldDefinition,
     ElementRecord,
     FieldDefinition,
     NodeDocument,
@@ -50,6 +51,10 @@ _FLOAT_RE = re.compile(
     r"(?<![A-Za-z_])[-+]?(?:\d+\.?\d*|\.\d+)(?:[EeDd][-+]?\d+)?"
 )
 _INT_RE = re.compile(r"[-+]?\d+")
+_ELEMENT_COMPONENT_RE = re.compile(
+    r"^\s*(.+?)\.\s+.*?\b(grid|node)\s+based\.\s*$", re.IGNORECASE
+)
+_XI_RE = re.compile(r"#xi\d+\s*=\s*(\d+)", re.IGNORECASE)
 
 
 def _read_lines(path: Path) -> List[str]:
@@ -143,6 +148,76 @@ def _numeric_values(lines: Iterable[str]) -> List[float]:
         for token in _FLOAT_RE.findall(line):
             values.append(float(token.replace("D", "E").replace("d", "e")))
     return values
+
+
+def _parse_element_field_header(
+    lines: Sequence[str], start: int, field_count: int
+) -> Tuple[Dict[str, ElementFieldDefinition], int]:
+    """Read element field names and the size of any grid-based value blocks."""
+
+    fields: Dict[str, ElementFieldDefinition] = {}
+    cursor = start
+    for _ in range(field_count):
+        while cursor < len(lines) and not _FIELD_RE.match(lines[cursor]):
+            if _ELEMENT_RE.match(lines[cursor]):
+                raise ExFileError(f"Incomplete element field header near line {cursor + 1}")
+            cursor += 1
+        if cursor >= len(lines):
+            raise ExFileError("Unexpected end of file while reading element fields")
+
+        match = _FIELD_RE.match(lines[cursor])
+        assert match is not None
+        name, field_type, coordinate_system, component_count = match.groups()
+        cursor += 1
+        component_names: List[str] = []
+        component_value_counts: List[int] = []
+        for _component_index in range(int(component_count)):
+            while cursor < len(lines) and not _ELEMENT_COMPONENT_RE.match(lines[cursor]):
+                if _ELEMENT_RE.match(lines[cursor]) or _FIELD_RE.match(lines[cursor]):
+                    raise ExFileError(
+                        f"Incomplete element component header near line {cursor + 1}"
+                    )
+                cursor += 1
+            if cursor >= len(lines):
+                raise ExFileError(
+                    "Unexpected end of file while reading element field components"
+                )
+            component_match = _ELEMENT_COMPONENT_RE.match(lines[cursor])
+            assert component_match is not None
+            component_name, basis = component_match.groups()
+            cursor += 1
+
+            xi_divisions: List[int] = []
+            probe = cursor
+            while probe < len(lines):
+                if (
+                    _ELEMENT_COMPONENT_RE.match(lines[probe])
+                    or _FIELD_RE.match(lines[probe])
+                    or _ELEMENT_RE.match(lines[probe])
+                ):
+                    break
+                xi_match = _XI_RE.search(lines[probe])
+                if xi_match:
+                    xi_divisions.append(int(xi_match.group(1)))
+                probe += 1
+            cursor = probe
+            value_count = 0
+            if basis.lower() == "grid":
+                value_count = 1
+                for divisions in xi_divisions:
+                    value_count *= divisions + 1
+            component_names.append(component_name.strip())
+            component_value_counts.append(value_count)
+
+        definition = ElementFieldDefinition(
+            name=name.strip(),
+            field_type=field_type.strip(),
+            coordinate_system=coordinate_system.strip().rstrip(", "),
+            component_names=tuple(component_names),
+            component_value_counts=tuple(component_value_counts),
+        )
+        fields[definition.name] = definition
+    return fields, cursor
 
 
 def parse_exnode(path: str | Path, *, is_data: bool | None = None) -> NodeDocument:
@@ -249,7 +324,7 @@ def parse_exnode(path: str | Path, *, is_data: bool | None = None) -> NodeDocume
 
 
 def parse_exelem(path: str | Path) -> ElementDocument:
-    """Parse element identifiers, dimensions, and node connectivity."""
+    """Parse element identifiers, connectivity, and grid-based field values."""
 
     source = Path(path)
     lines = _read_lines(source)
@@ -257,6 +332,7 @@ def parse_exelem(path: str | Path) -> ElementDocument:
     dimension = 0
     declared_node_count: int | None = None
     uses_cubic_hermite = False
+    active_fields: Dict[str, ElementFieldDefinition] = {}
     cursor = 0
     while cursor < len(lines):
         line = lines[cursor]
@@ -274,6 +350,20 @@ def parse_exelem(path: str | Path) -> ElementDocument:
         if re.search(r"(?:c\.|cubic\s+)Hermite", line, re.IGNORECASE):
             uses_cubic_hermite = True
 
+        fields_match = re.match(r"^\s*#Fields\s*=\s*(\d+)", line, re.IGNORECASE)
+        if fields_match:
+            header_start = cursor
+            active_fields, cursor = _parse_element_field_header(
+                lines, cursor + 1, int(fields_match.group(1))
+            )
+            document.fields.update(active_fields)
+            if any(
+                re.search(r"(?:c\.|cubic\s+)Hermite", header_line, re.IGNORECASE)
+                for header_line in lines[header_start:cursor]
+            ):
+                uses_cubic_hermite = True
+            continue
+
         element_match = _ELEMENT_RE.match(line)
         if not element_match:
             cursor += 1
@@ -283,6 +373,7 @@ def parse_exelem(path: str | Path) -> ElementDocument:
         cursor += 1
         nodes: List[int] = []
         scale_factors: List[float] = []
+        raw_field_values: List[float] = []
         while cursor < len(lines):
             candidate = lines[cursor]
             if _ELEMENT_RE.match(candidate) or _SHAPE_RE.search(candidate) or _GROUP_RE.match(candidate):
@@ -310,6 +401,28 @@ def parse_exelem(path: str | Path) -> ElementDocument:
                     cursor += 1
                     if declared_node_count and len(nodes) >= declared_node_count:
                         break
+                continue
+            values_match = re.match(
+                r"^\s*Values\s*:\s*(.*?)\s*$", candidate, re.IGNORECASE
+            )
+            if values_match:
+                raw_field_values.extend(_numeric_values([values_match.group(1)]))
+                cursor += 1
+                while cursor < len(lines):
+                    value_line = lines[cursor]
+                    if (
+                        _ELEMENT_RE.match(value_line)
+                        or _SHAPE_RE.search(value_line)
+                        or _GROUP_RE.match(value_line)
+                        or re.match(
+                            r"^\s*(?:Nodes|Scale factors|Faces)\s*:",
+                            value_line,
+                            re.IGNORECASE,
+                        )
+                    ):
+                        break
+                    raw_field_values.extend(_numeric_values([value_line]))
+                    cursor += 1
                 continue
             factors_match = re.match(
                 r"^\s*Scale factors\s*:\s*(.*?)\s*$", candidate, re.IGNORECASE
@@ -341,7 +454,31 @@ def parse_exelem(path: str | Path) -> ElementDocument:
             document.warnings.append(
                 f"Element {identifier}: expected {declared_node_count} nodes but found {len(nodes)}"
             )
-        if nodes:
+        element_fields: Dict[str, np.ndarray] = {}
+        value_offset = 0
+        for field_name, definition in active_fields.items():
+            component_values: List[float] = []
+            for value_count in definition.component_value_counts:
+                values = raw_field_values[value_offset : value_offset + value_count]
+                value_offset += value_count
+                component_values.append(float(np.mean(values)) if values else np.nan)
+            if definition.value_count:
+                element_fields[field_name] = np.asarray(component_values, dtype=float)
+        expected_value_count = sum(
+            definition.value_count for definition in active_fields.values()
+        )
+        if expected_value_count and len(raw_field_values) < expected_value_count:
+            document.warnings.append(
+                f"Element {identifier}: expected {expected_value_count} field values but "
+                f"found {len(raw_field_values)}"
+            )
+        if len(raw_field_values) > expected_value_count:
+            document.warnings.append(
+                f"Element {identifier}: ignored {len(raw_field_values) - expected_value_count} "
+                "extra field value(s)"
+            )
+
+        if nodes or element_fields:
             document.elements.append(
                 ElementRecord(
                     identifier=identifier,
@@ -349,6 +486,7 @@ def parse_exelem(path: str | Path) -> ElementDocument:
                     node_ids=tuple(nodes),
                     interpolation="cubic_hermite" if uses_cubic_hermite else "linear",
                     scale_factors=tuple(scale_factors),
+                    fields=element_fields,
                 )
             )
         elif dimension == 1:
@@ -357,7 +495,7 @@ def parse_exelem(path: str | Path) -> ElementDocument:
             )
 
     if not document.elements:
-        raise ExFileError(f"No elements with node connectivity found in {source.name}")
+        raise ExFileError(f"No element records found in {source.name}")
     return document
 
 

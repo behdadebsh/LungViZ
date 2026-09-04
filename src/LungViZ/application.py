@@ -15,6 +15,7 @@ from .scene import (
     build_mesh_scene,
     build_point_scene,
     coordinate_field_names,
+    edge_scalar_variants,
     scalar_variants,
 )
 from .volume import CTVolume, load_dicom_directory, load_nifti
@@ -91,6 +92,7 @@ class RegionState:
     field_structure: object | None = None
     network: object | None = None
     scalar_values: Dict[str, np.ndarray] = field(default_factory=dict)
+    scalar_locations: Dict[str, str] = field(default_factory=dict)
     scalar_options: List[str] = field(default_factory=list)
     radius_options: List[str] = field(default_factory=lambda: ["Constant"])
     coordinate_index: int = 0
@@ -246,6 +248,7 @@ class LungVizApplication:
         self._remove_region_structures(region)
         region.scene = None
         region.scalar_values.clear()
+        region.scalar_locations.clear()
         region.scalar_options.clear()
         region.radius_options = ["Constant"]
         region.warnings.clear()
@@ -278,10 +281,26 @@ class LungVizApplication:
                     defined_on="edges",
                     enabled=False,
                 )
-                region.scalar_values = dict(scalar_variants(mesh))
-                for field_name, values in region.scalar_values.items():
+                node_scalars = dict(scalar_variants(mesh))
+                region.scalar_values.update(node_scalars)
+                region.scalar_locations.update(
+                    {field_name: "nodes" for field_name in node_scalars}
+                )
+                for field_name, values in node_scalars.items():
                     network.add_scalar_quantity(
                         field_name, _finite_for_display(values), enabled=False
+                    )
+                for field_name, values in edge_scalar_variants(mesh).items():
+                    display_name = field_name
+                    if display_name in region.scalar_values:
+                        display_name = f"{field_name} [elements]"
+                    region.scalar_values[display_name] = values
+                    region.scalar_locations[display_name] = "edges"
+                    network.add_scalar_quantity(
+                        display_name,
+                        _finite_for_display(values),
+                        defined_on="edges",
+                        enabled=False,
                     )
                 for field_name, scene_field in mesh.fields.items():
                     if (
@@ -291,6 +310,14 @@ class LungVizApplication:
                         network.add_vector_quantity(
                             field_name,
                             _finite_for_display(scene_field.values),
+                            enabled=False,
+                        )
+                for field_name, scene_field in mesh.edge_fields.items():
+                    if scene_field.values.shape[1] in (2, 3):
+                        network.add_vector_quantity(
+                            field_name,
+                            _finite_for_display(scene_field.values),
+                            defined_on="edges",
                             enabled=False,
                         )
                 region.network = network
@@ -311,6 +338,9 @@ class LungVizApplication:
                         radius=0.008,
                     )
                     region.scalar_values = self._add_point_fields(cloud, points)
+                    region.scalar_locations.update(
+                        {field_name: "nodes" for field_name in region.scalar_values}
+                    )
                     region.field_structure = cloud
                     region.structures.append(cloud)
                     region.warnings.extend(points.warnings)
@@ -325,6 +355,9 @@ class LungVizApplication:
                     f"{region.name} / nodes", points.coordinates, radius=0.008
                 )
                 region.scalar_values = self._add_point_fields(cloud, points)
+                region.scalar_locations.update(
+                    {field_name: "nodes" for field_name in region.scalar_values}
+                )
                 region.field_structure = cloud
                 region.structures.append(cloud)
                 region.warnings.extend(points.warnings)
@@ -332,7 +365,14 @@ class LungVizApplication:
             except ExFileError as exc:
                 region.message = f"Node cloud could not be built: {exc}"
         elif region.element_documents:
-            region.message = "Connectivity loaded; add an exnode file to this region."
+            contains_fields = any(document.fields for document in region.element_documents)
+            if contains_fields:
+                region.message = (
+                    "Element fields loaded; add the matching exnode and connectivity "
+                    "exelem files to this region."
+                )
+            else:
+                region.message = "Connectivity loaded; add an exnode file to this region."
 
         for data_index, document in enumerate(region.data_documents, start=1):
             try:
@@ -354,6 +394,23 @@ class LungVizApplication:
             region.scalar_index, max(0, len(region.scalar_options) - 1)
         )
         region.radius_index = min(region.radius_index, len(region.radius_options) - 1)
+        if region.network is not None and region.radius_index == 0:
+            for preferred_location in ("edges", "nodes"):
+                matching_index = next(
+                    (
+                        index
+                        for index, field_name in enumerate(
+                            region.radius_options[1:], start=1
+                        )
+                        if "radius" in field_name.lower()
+                        and region.scalar_locations.get(field_name) == preferred_location
+                    ),
+                    None,
+                )
+                if matching_index is not None:
+                    region.radius_index = matching_index
+                    self._set_radius(region)
+                    break
         for structure in region.structures:
             try:
                 structure.set_transform(region.transform)
@@ -397,20 +454,30 @@ class LungVizApplication:
             return
         name = region.scalar_options[region.scalar_index]
         region.field_structure.add_scalar_quantity(
-            name, _finite_for_display(region.scalar_values[name]), enabled=True
+            name,
+            _finite_for_display(region.scalar_values[name]),
+            defined_on=region.scalar_locations.get(name, "nodes"),
+            enabled=True,
         )
 
     def _set_radius(self, region: RegionState) -> None:
         if region.network is None:
             return
+        region.network.clear_node_radius_quantity()
+        region.network.clear_edge_radius_quantity()
         if region.radius_index == 0:
-            region.network.clear_node_radius_quantity()
             return
         name = region.radius_options[region.radius_index]
         values = np.clip(_finite_for_display(region.scalar_values[name]), 0.0, None)
         quantity_name = f"radius: {name}"
-        region.network.add_scalar_quantity(quantity_name, values, enabled=False)
-        region.network.set_node_radius_quantity(quantity_name, autoscale=True)
+        location = region.scalar_locations.get(name, "nodes")
+        region.network.add_scalar_quantity(
+            quantity_name, values, defined_on=location, enabled=False
+        )
+        if location == "edges":
+            region.network.set_edge_radius_quantity(quantity_name, autoscale=False)
+        else:
+            region.network.set_node_radius_quantity(quantity_name, autoscale=False)
 
     def remove_selected_region(self) -> None:
         region = self.selected_region

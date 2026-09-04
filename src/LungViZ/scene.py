@@ -137,6 +137,17 @@ def build_mesh_scene(
         raise ExFileError("No coordinate field was found in the loaded node files")
 
     merged, derivatives, definitions, warnings = _merge_nodes(node_documents)
+    element_field_definitions = {}
+    element_field_values = {}
+    for document in element_documents:
+        warnings.extend(document.warnings)
+        for field_name, definition in document.fields.items():
+            if definition.value_count:
+                element_field_definitions[field_name] = definition
+                element_field_values.setdefault(field_name, {})
+        for element in document.elements:
+            for field_name, values in element.fields.items():
+                element_field_values.setdefault(field_name, {})[element.identifier] = values
     usable_ids = [
         node_id
         for node_id, values in merged.items()
@@ -165,6 +176,10 @@ def build_mesh_scene(
     }
     edges: List[Tuple[int, int]] = []
     edge_element_ids: List[int] = []
+    edge_field_values = {
+        name: [] for name in element_field_definitions
+    }
+    drawable_element_ids = set()
     missing_ids = set()
     skipped_dimensions = set()
     warned_missing_derivatives = False
@@ -181,9 +196,20 @@ def build_mesh_scene(
             display_fields[field_name].append(interpolated)
         return new_index
 
+    def append_edge(first_index: int, second_index: int, element) -> None:
+        edges.append((first_index, second_index))
+        edge_element_ids.append(element.display_identifier)
+        drawable_element_ids.add(element.identifier)
+        for field_name, definition in element_field_definitions.items():
+            value = element_field_values.get(field_name, {}).get(element.identifier)
+            if value is None:
+                value = np.full(len(definition.component_names), np.nan, dtype=float)
+            edge_field_values[field_name].append(np.asarray(value, dtype=float))
+
     for document in element_documents:
-        warnings.extend(document.warnings)
         for element in document.elements:
+            if not element.node_ids:
+                continue
             if element.dimension != 1:
                 skipped_dimensions.add(element.dimension)
                 continue
@@ -222,11 +248,9 @@ def build_mesh_scene(
                         current = append_interpolated(
                             first_index, second_index, float(xi), point
                         )
-                        edges.append((previous, current))
-                        edge_element_ids.append(element.display_identifier)
+                        append_edge(previous, current, element)
                         previous = current
-                    edges.append((previous, second_index))
-                    edge_element_ids.append(element.display_identifier)
+                    append_edge(previous, second_index, element)
                     continue
                 if not can_interpolate and not warned_missing_derivatives:
                     warnings.append(
@@ -242,8 +266,7 @@ def build_mesh_scene(
                         "the zero-length segment was skipped"
                     )
                     continue
-                edges.append((index_by_id[first], index_by_id[second]))
-                edge_element_ids.append(element.display_identifier)
+                append_edge(index_by_id[first], index_by_id[second], element)
 
     if skipped_dimensions:
         warnings.append(
@@ -257,6 +280,21 @@ def build_mesh_scene(
     if not edges:
         raise ExFileError("No drawable 1D connectivity matched the loaded coordinate nodes")
 
+    for field_name, values_by_element in element_field_values.items():
+        field_ids = set(values_by_element)
+        missing_field_ids = drawable_element_ids - field_ids
+        unmatched_field_ids = field_ids - drawable_element_ids
+        if missing_field_ids:
+            warnings.append(
+                f"Element field {field_name!r} has no value for "
+                f"{len(missing_field_ids)} connected element(s)"
+            )
+        if unmatched_field_ids:
+            warnings.append(
+                f"Element field {field_name!r} contains {len(unmatched_field_ids)} value(s) "
+                "whose identifiers are not present in this mesh connectivity"
+            )
+
     fields = {
         name: SceneField(
             name=name,
@@ -265,6 +303,14 @@ def build_mesh_scene(
         )
         for name, values in display_fields.items()
     }
+    edge_fields = {
+        name: SceneField(
+            name=name,
+            component_names=element_field_definitions[name].component_names,
+            values=np.asarray(values, dtype=float),
+        )
+        for name, values in edge_field_values.items()
+    }
     return MeshScene(
         coordinates=np.asarray(display_coordinates, dtype=float),
         node_ids=np.asarray(display_node_ids, dtype=int),
@@ -272,16 +318,17 @@ def build_mesh_scene(
         edge_element_ids=np.asarray(edge_element_ids, dtype=int),
         fields=fields,
         coordinate_field=coordinate_field,
+        edge_fields=edge_fields,
         original_node_count=len(usable_ids),
         warnings=warnings,
     )
 
 
-def scalar_variants(scene: MeshScene | PointScene) -> Mapping[str, np.ndarray]:
+def _scalar_variants(fields: Mapping[str, SceneField]) -> Mapping[str, np.ndarray]:
     """Return display-ready scalar component and magnitude arrays."""
 
     variants: "OrderedDict[str, np.ndarray]" = OrderedDict()
-    for field_name, field in scene.fields.items():
+    for field_name, field in fields.items():
         if field.values.shape[1] == 1:
             variants[field_name] = field.values[:, 0]
             continue
@@ -289,3 +336,15 @@ def scalar_variants(scene: MeshScene | PointScene) -> Mapping[str, np.ndarray]:
             variants[f"{field_name}.{component_name}"] = field.values[:, index]
         variants[f"{field_name}.magnitude"] = np.linalg.norm(field.values, axis=1)
     return variants
+
+
+def scalar_variants(scene: MeshScene | PointScene) -> Mapping[str, np.ndarray]:
+    """Return display-ready node scalar component and magnitude arrays."""
+
+    return _scalar_variants(scene.fields)
+
+
+def edge_scalar_variants(scene: MeshScene) -> Mapping[str, np.ndarray]:
+    """Return display-ready element fields aligned with rendered mesh edges."""
+
+    return _scalar_variants(scene.edge_fields)

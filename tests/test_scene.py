@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from LungViZ.exfile import parse_exelem, parse_exnode
-from LungViZ.scene import build_mesh_scene, scalar_variants
+from LungViZ.scene import build_mesh_scene, edge_scalar_variants, scalar_variants
 
 
 EXAMPLES = Path(__file__).parents[1] / "examples"
@@ -85,3 +85,42 @@ Element: 1 0 0
     assert scene.edges.shape == (4, 2)
     np.testing.assert_allclose(scene.coordinates[3], [0.5, 0.25, 0.0])
     np.testing.assert_allclose(scene.fields["coordinates"].values[3], [0.5, 0.25, 0.0])
+
+
+def test_grid_element_fields_align_with_connectivity_edges(tmp_path):
+    field_path = tmp_path / "element_fields.exelem"
+    field_path.write_text(
+        """Group name: sample_fields
+Shape. Dimension=1
+#Scale factor sets=0
+#Nodes=0
+#Fields=2
+1)flow, field, rectangular cartesian, #Components=1
+ flow. l.Lagrange, no modify, grid based.
+ #xi1=1
+2)radius_perf, field, rectangular cartesian, #Components=1
+ radius_perf. l.Lagrange, no modify, grid based.
+ #xi1=1
+Element: 1 0 0
+ Values:
+  100 100 0.30 0.30
+Element: 2 0 0
+ Values:
+  60 60 0.20 0.20
+Element: 3 0 0
+ Values:
+  40 40 0.10 0.10
+""",
+        encoding="utf-8",
+    )
+
+    scene = build_mesh_scene(
+        [parse_exnode(EXAMPLES / "sample.exnode")],
+        [parse_exelem(EXAMPLES / "sample.exelem"), parse_exelem(field_path)],
+    )
+
+    np.testing.assert_allclose(scene.edge_fields["flow"].values[:, 0], [100, 60, 40])
+    np.testing.assert_allclose(
+        scene.edge_fields["radius_perf"].values[:, 0], [0.30, 0.20, 0.10]
+    )
+    np.testing.assert_allclose(edge_scalar_variants(scene)["flow"], [100, 60, 40])

@@ -54,12 +54,26 @@ class NodeDocument:
 
 
 @dataclass(frozen=True)
+class ElementFieldDefinition:
+    name: str
+    field_type: str
+    coordinate_system: str
+    component_names: Tuple[str, ...]
+    component_value_counts: Tuple[int, ...]
+
+    @property
+    def value_count(self) -> int:
+        return sum(self.component_value_counts)
+
+
+@dataclass(frozen=True)
 class ElementRecord:
     identifier: Tuple[int, int, int]
     dimension: int
     node_ids: Tuple[int, ...]
     interpolation: str = "linear"
     scale_factors: Tuple[float, ...] = ()
+    fields: Dict[str, np.ndarray] = field(default_factory=dict)
 
     @property
     def display_identifier(self) -> int:
@@ -70,6 +84,7 @@ class ElementRecord:
 class ElementDocument:
     path: Path
     group_name: str = ""
+    fields: Dict[str, ElementFieldDefinition] = field(default_factory=dict)
     elements: List[ElementRecord] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -89,6 +104,7 @@ class MeshScene:
     edge_element_ids: np.ndarray
     fields: Dict[str, SceneField]
     coordinate_field: str
+    edge_fields: Dict[str, SceneField] = field(default_factory=dict)
     original_node_count: int = 0
     warnings: List[str] = field(default_factory=list)
 

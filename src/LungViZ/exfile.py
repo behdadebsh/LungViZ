@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -511,3 +511,101 @@ def load_ex_file(path: str | Path) -> NodeDocument | ElementDocument:
     raise ExFileError(
         f"Unsupported extension {source.suffix!r}; choose .exnode, .exelem, or .exdata"
     )
+
+
+def _replace_numeric_values(
+    lines: Sequence[str], replacements: Mapping[int, float]
+) -> List[str]:
+    token_index = 0
+    updated: List[str] = []
+    for line in lines:
+        if line.lstrip().startswith("!"):
+            updated.append(line)
+            continue
+
+        def replace(match: re.Match) -> str:
+            nonlocal token_index
+            replacement = replacements.get(token_index)
+            token_index += 1
+            return match.group(0) if replacement is None else f"{replacement:.15g}"
+
+        updated.append(_FLOAT_RE.sub(replace, line))
+    return updated
+
+
+def write_exnode_coordinates(
+    document: NodeDocument,
+    destination: str | Path,
+    coordinate_field: str | None = None,
+) -> Path:
+    """Write edited coordinates while preserving the source EXNODE structure."""
+
+    source = document.path.resolve()
+    target = Path(destination).expanduser().resolve()
+    if target == source:
+        raise ExFileError("Export to a new file rather than overwriting the loaded EXNODE")
+    if coordinate_field is None:
+        coordinate_field = next(
+            (name for name, definition in document.fields.items() if definition.is_coordinate),
+            None,
+        )
+    if coordinate_field is None or coordinate_field not in document.fields:
+        raise ExFileError("The node document has no selected coordinate field to export")
+
+    try:
+        raw_text = source.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise ExFileError(f"Could not read {source}: {exc}") from exc
+    lines = raw_text.splitlines()
+    nodes = {node.identifier: node for node in document.nodes}
+    active_fields: Dict[str, FieldDefinition] = {}
+    cursor = 0
+    while cursor < len(lines):
+        fields_match = re.match(r"^\s*#Fields\s*=\s*(\d+)", lines[cursor], re.IGNORECASE)
+        if fields_match:
+            active_fields, cursor, _warnings = _parse_field_header(
+                lines, cursor + 1, int(fields_match.group(1))
+            )
+            continue
+        node_match = _NODE_RE.match(lines[cursor])
+        if not node_match:
+            cursor += 1
+            continue
+
+        node_id = int(node_match.group(1))
+        value_start = cursor + 1
+        value_end = value_start
+        while value_end < len(lines):
+            candidate = lines[value_end]
+            if (
+                _NODE_RE.match(candidate)
+                or _ELEMENT_RE.match(candidate)
+                or _GROUP_RE.match(candidate)
+                or _SHAPE_RE.search(candidate)
+                or re.match(r"^\s*#Fields\s*=", candidate, re.IGNORECASE)
+            ):
+                break
+            value_end += 1
+
+        definition = active_fields.get(coordinate_field)
+        node = nodes.get(node_id)
+        if definition is not None and node is not None and coordinate_field in node.fields:
+            coordinates = node.fields[coordinate_field]
+            replacements = {
+                component.value_index: float(coordinates[index])
+                for index, component in enumerate(definition.components[:3])
+                if index < len(coordinates)
+            }
+            lines[value_start:value_end] = _replace_numeric_values(
+                lines[value_start:value_end], replacements
+            )
+        cursor = value_end
+
+    try:
+        target.write_text(
+            "\n".join(lines) + ("\n" if raw_text.endswith(("\n", "\r")) else ""),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise ExFileError(f"Could not write {target}: {exc}") from exc
+    return target

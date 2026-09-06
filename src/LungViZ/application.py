@@ -10,7 +10,7 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
-from .exfile import ExFileError, load_ex_file
+from .exfile import ExFileError, load_ex_file, write_exnode_coordinates
 from .model import ElementDocument, MeshScene, NodeDocument, PointScene
 from .scene import (
     build_mesh_scene,
@@ -67,6 +67,25 @@ def choose_nifti_file() -> str:
         return filedialog.askopenfilename(
             title="Choose a NIfTI CT volume",
             filetypes=[("NIfTI images", "*.nii *.nii.gz"), ("All files", "*.*")],
+        )
+    finally:
+        root.destroy()
+
+
+def choose_exnode_export_path(source: Path) -> str:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        return filedialog.asksaveasfilename(
+            title="Export edited node coordinates",
+            initialdir=str(source.parent),
+            initialfile=f"{source.stem}_edited.exnode",
+            defaultextension=".exnode",
+            filetypes=[("OpenCMISS EX node files", "*.exnode"), ("All files", "*.*")],
         )
     finally:
         root.destroy()
@@ -198,6 +217,31 @@ class RegionState:
     transform: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=float))
     message: str = ""
     warnings: List[str] = field(default_factory=list)
+    edit_mode: bool = False
+    edit_selected: List[int] = field(default_factory=list)
+    edit_handles: object | None = None
+    edit_selection_structure: object | None = None
+    edit_handle_name: str = ""
+    edit_selection_name: str = ""
+    edit_original_coordinates: np.ndarray | None = None
+    edit_original_node_ids: np.ndarray | None = None
+    edit_translation: np.ndarray = field(
+        default_factory=lambda: np.zeros(3, dtype=float)
+    )
+    edit_absolute: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float))
+    edit_undo: List["NodeEdit"] = field(default_factory=list)
+    edit_redo: List["NodeEdit"] = field(default_factory=list)
+    edit_gizmo_transform: np.ndarray | None = None
+    edit_mouse_active: bool = False
+    edit_mouse_history: "NodeEdit | None" = None
+
+
+@dataclass
+class NodeEdit:
+    indices: np.ndarray
+    before: np.ndarray
+    after: np.ndarray
+    kind: str = "numeric"
 
 
 @dataclass
@@ -342,6 +386,11 @@ class LungVizApplication:
         region.structures.clear()
         region.field_structure = None
         region.network = None
+        region.edit_handles = None
+        region.edit_selection_structure = None
+        region.edit_handle_name = ""
+        region.edit_selection_name = ""
+        region.edit_gizmo_transform = None
 
     def _add_point_fields(
         self, structure, scene: PointScene, *, identifier_name: str = "node identifier"
@@ -547,8 +596,12 @@ class LungVizApplication:
             except AttributeError:
                 pass
         self._set_region_gizmo(region, region.transform_gizmo)
+        if region.edit_mode and isinstance(region.scene, MeshScene):
+            self._create_edit_structures(region)
 
     def _set_region_gizmo(self, region: RegionState, enabled: bool) -> None:
+        if enabled and region.edit_mode:
+            self._set_edit_mode(region, False)
         region.transform_gizmo = enabled
         for structure in region.structures:
             try:
@@ -603,6 +656,371 @@ class LungVizApplication:
             region.network.set_edge_radius_quantity(quantity_name, autoscale=False)
         else:
             region.network.set_node_radius_quantity(quantity_name, autoscale=False)
+
+    def _remove_edit_selection_structure(self, region: RegionState) -> None:
+        structure = region.edit_selection_structure
+        if structure is not None:
+            try:
+                structure.remove()
+            except (AttributeError, RuntimeError):
+                pass
+            region.structures = [item for item in region.structures if item is not structure]
+        region.edit_selection_structure = None
+        region.edit_selection_name = ""
+        region.edit_gizmo_transform = None
+        region.edit_mouse_active = False
+        region.edit_mouse_history = None
+
+    def _remove_edit_structures(self, region: RegionState) -> None:
+        self._remove_edit_selection_structure(region)
+        structure = region.edit_handles
+        if structure is not None:
+            try:
+                structure.remove()
+            except (AttributeError, RuntimeError):
+                pass
+            region.structures = [item for item in region.structures if item is not structure]
+        region.edit_handles = None
+        region.edit_handle_name = ""
+
+    def _update_edit_handles(self, region: RegionState) -> None:
+        if not isinstance(region.scene, MeshScene) or region.edit_handles is None:
+            return
+        count = region.scene.original_node_count
+        coordinates = region.scene.coordinates[:count]
+        region.edit_handles.update_point_positions(coordinates)
+        colors = np.tile(np.asarray([0.72, 0.76, 0.82]), (count, 1))
+        if region.edit_selected:
+            colors[np.asarray(region.edit_selected, dtype=int)] = [1.0, 0.28, 0.04]
+        region.edit_handles.add_color_quantity(
+            "Node edit selection", colors, enabled=True
+        )
+
+    def _rebuild_edit_selection_structure(self, region: RegionState) -> None:
+        import polyscope as ps
+
+        self._remove_edit_selection_structure(region)
+        if not isinstance(region.scene, MeshScene) or not region.edit_selected:
+            return
+        selected = np.asarray(region.edit_selected, dtype=int)
+        coordinates = region.scene.coordinates[selected]
+        name = f"{region.name} / selected edit nodes / {region.key}"
+        structure = ps.register_point_cloud(
+            name,
+            coordinates,
+            radius=0.012,
+            color=(1.0, 0.28, 0.04),
+        )
+        structure.set_transform(region.transform)
+        structure.set_transform_gizmo_enabled(True)
+        region.edit_selection_structure = structure
+        region.edit_selection_name = name
+        region.edit_gizmo_transform = np.asarray(region.transform, dtype=float).copy()
+        region.structures.append(structure)
+
+    def _create_edit_structures(self, region: RegionState) -> None:
+        import polyscope as ps
+
+        self._remove_edit_structures(region)
+        if not isinstance(region.scene, MeshScene):
+            return
+        count = region.scene.original_node_count
+        name = f"{region.name} / editable nodes / {region.key}"
+        handles = ps.register_point_cloud(
+            name,
+            region.scene.coordinates[:count],
+            radius=0.008,
+            color=(0.72, 0.76, 0.82),
+        )
+        handles.set_transform(region.transform)
+        region.edit_handles = handles
+        region.edit_handle_name = name
+        region.structures.append(handles)
+        self._update_edit_handles(region)
+        self._rebuild_edit_selection_structure(region)
+
+    def _set_edit_mode(self, region: RegionState, enabled: bool) -> None:
+        if enabled and not isinstance(region.scene, MeshScene):
+            region.message = "Node editing requires a loaded 1D mesh."
+            return
+        region.edit_mode = enabled
+        if not enabled:
+            self._remove_edit_structures(region)
+            region.message = "Node edit mode disabled."
+            return
+        if region.transform_gizmo:
+            self._set_region_gizmo(region, False)
+        assert isinstance(region.scene, MeshScene)
+        node_ids = region.scene.node_ids[: region.scene.original_node_count]
+        if (
+            region.edit_original_coordinates is None
+            or region.edit_original_node_ids is None
+            or not np.array_equal(region.edit_original_node_ids, node_ids)
+        ):
+            region.edit_original_coordinates = region.scene.coordinates[
+                : region.scene.original_node_count
+            ].copy()
+            region.edit_original_node_ids = node_ids.copy()
+            region.edit_undo.clear()
+            region.edit_redo.clear()
+        self._create_edit_structures(region)
+        region.message = "Node edit mode enabled; click node handles to select them."
+
+    def _select_edit_nodes(self, region: RegionState, indices: Sequence[int]) -> None:
+        if not isinstance(region.scene, MeshScene):
+            return
+        count = region.scene.original_node_count
+        region.edit_selected = sorted(
+            {int(index) for index in indices if 0 <= int(index) < count}
+        )
+        if region.edit_selected:
+            region.edit_absolute = np.mean(
+                region.scene.coordinates[np.asarray(region.edit_selected, dtype=int)], axis=0
+            )
+        self._update_edit_handles(region)
+        self._rebuild_edit_selection_structure(region)
+
+    def _write_node_positions(
+        self, region: RegionState, indices: np.ndarray, positions: np.ndarray
+    ) -> None:
+        assert isinstance(region.scene, MeshScene)
+        coordinate_field = region.scene.coordinate_field
+        node_ids = region.scene.node_ids[indices]
+        positions_by_id = {
+            int(node_id): position for node_id, position in zip(node_ids, positions)
+        }
+        for document in region.node_documents:
+            for node in document.nodes:
+                position = positions_by_id.get(node.identifier)
+                values = node.fields.get(coordinate_field)
+                if position is not None and values is not None:
+                    values[: min(3, len(values))] = position[: min(3, len(values))]
+
+    def _refresh_region_after_edit(
+        self, region: RegionState, *, update_selection_structure: bool
+    ) -> None:
+        assert isinstance(region.scene, MeshScene)
+        previous = region.scene
+        coordinate_options = coordinate_field_names(region.node_documents)
+        coordinate_name = coordinate_options[
+            min(region.coordinate_index, len(coordinate_options) - 1)
+        ]
+        updated = build_mesh_scene(
+            region.node_documents, region.element_documents, coordinate_name
+        )
+        if updated.coordinates.shape != previous.coordinates.shape or not np.array_equal(
+            updated.edges, previous.edges
+        ):
+            raise ExFileError("Editing changed the rendered mesh topology unexpectedly")
+        region.scene = updated
+        region.network.update_node_positions(updated.coordinates)
+        for field_name, values in scalar_variants(updated).items():
+            region.scalar_values[field_name] = values
+            region.network.add_scalar_quantity(
+                field_name, _finite_for_display(values), enabled=False
+            )
+        if region.scalar_options:
+            self._set_scalar(region)
+        self._set_radius(region)
+        self._update_edit_handles(region)
+        if update_selection_structure:
+            self._rebuild_edit_selection_structure(region)
+
+    def _set_node_positions(
+        self,
+        region: RegionState,
+        indices: Sequence[int],
+        positions: np.ndarray,
+        *,
+        record: bool = True,
+        kind: str = "numeric",
+        update_selection_structure: bool = True,
+    ) -> None:
+        if not isinstance(region.scene, MeshScene):
+            return
+        index_array = np.asarray(indices, dtype=int)
+        if not index_array.size:
+            return
+        new_positions = np.asarray(positions, dtype=float).reshape((-1, 3))
+        if len(new_positions) != len(index_array) or not np.all(np.isfinite(new_positions)):
+            raise ValueError("Edited node coordinates must be finite x, y, z values")
+        before = region.scene.coordinates[index_array].copy()
+        if np.allclose(before, new_positions):
+            return
+        self._write_node_positions(region, index_array, new_positions)
+        self._refresh_region_after_edit(
+            region, update_selection_structure=update_selection_structure
+        )
+        after = region.scene.coordinates[index_array].copy()
+        if record:
+            if kind == "mouse" and region.edit_mouse_history is not None:
+                previous_edit = region.edit_mouse_history
+                if np.array_equal(previous_edit.indices, index_array):
+                    previous_edit.after = after.copy()
+                else:
+                    region.edit_mouse_history = None
+            if kind != "mouse" or region.edit_mouse_history is None:
+                edit = NodeEdit(index_array.copy(), before, after.copy(), kind)
+                region.edit_undo.append(edit)
+                if kind == "mouse":
+                    region.edit_mouse_history = edit
+            region.edit_redo.clear()
+        if len(region.edit_selected) == 1:
+            region.edit_absolute = region.scene.coordinates[
+                region.edit_selected[0]
+            ].copy()
+        region.message = f"Moved {len(index_array)} node(s)."
+
+    def _translate_selected_nodes(
+        self, region: RegionState, translation: np.ndarray, *, kind: str = "numeric"
+    ) -> None:
+        if not isinstance(region.scene, MeshScene) or not region.edit_selected:
+            return
+        indices = np.asarray(region.edit_selected, dtype=int)
+        delta = np.asarray(translation, dtype=float)
+        self._set_node_positions(
+            region,
+            indices,
+            region.scene.coordinates[indices] + delta,
+            kind=kind,
+            update_selection_structure=kind != "mouse",
+        )
+
+    def _undo_node_edit(self, region: RegionState) -> None:
+        if not region.edit_undo:
+            return
+        region.edit_mouse_history = None
+        edit = region.edit_undo.pop()
+        self._set_node_positions(region, edit.indices, edit.before, record=False)
+        region.edit_redo.append(edit)
+        region.message = f"Undid movement of {len(edit.indices)} node(s)."
+
+    def _redo_node_edit(self, region: RegionState) -> None:
+        if not region.edit_redo:
+            return
+        edit = region.edit_redo.pop()
+        self._set_node_positions(region, edit.indices, edit.after, record=False)
+        region.edit_undo.append(edit)
+        region.message = f"Redid movement of {len(edit.indices)} node(s)."
+
+    def _reset_selected_nodes(self, region: RegionState) -> None:
+        if region.edit_original_coordinates is None or not region.edit_selected:
+            return
+        indices = np.asarray(region.edit_selected, dtype=int)
+        self._set_node_positions(
+            region, indices, region.edit_original_coordinates[indices], kind="reset"
+        )
+
+    def _reset_all_nodes(self, region: RegionState) -> None:
+        if region.edit_original_coordinates is None:
+            return
+        indices = np.arange(len(region.edit_original_coordinates), dtype=int)
+        self._set_node_positions(
+            region, indices, region.edit_original_coordinates, kind="reset"
+        )
+
+    def export_edited_exnode(
+        self, region: RegionState, destination: str | Path | None = None
+    ) -> Path | None:
+        if not isinstance(region.scene, MeshScene):
+            return None
+        coordinate_field = region.scene.coordinate_field
+        document = next(
+            (
+                item
+                for item in region.node_documents
+                if coordinate_field in item.fields
+                and any(coordinate_field in node.fields for node in item.nodes)
+            ),
+            None,
+        )
+        if document is None:
+            raise ExFileError("No coordinate EXNODE is available to export")
+        if destination is None:
+            destination = choose_exnode_export_path(document.path)
+        if not destination:
+            return None
+        exported = write_exnode_coordinates(document, destination, coordinate_field)
+        region.message = f"Exported edited coordinates to {exported.name}."
+        return exported
+
+    def _consume_node_pick(self, ps, psim) -> None:
+        region = self.selected_region
+        if region is None or not region.edit_mode or not isinstance(region.scene, MeshScene):
+            return
+        try:
+            if not ps.have_selection():
+                return
+            picked = ps.get_selection()
+        except (AttributeError, RuntimeError):
+            return
+
+        index = None
+        if picked.structure_name == region.edit_handle_name:
+            index = picked.structure_data.get("index", picked.local_index)
+        elif picked.structure_name == region.edit_selection_name:
+            local_index = int(picked.structure_data.get("index", picked.local_index))
+            if 0 <= local_index < len(region.edit_selected):
+                index = region.edit_selected[local_index]
+        elif (
+            picked.structure_name == f"{region.name} / 1D mesh"
+            and str(picked.structure_data.get("element_type", "")).lower() == "node"
+        ):
+            index = picked.structure_data.get("index", picked.local_index)
+        if index is None or not 0 <= int(index) < region.scene.original_node_count:
+            return
+
+        shift = psim.IsKeyDown(psim.ImGuiKey_LeftShift) or psim.IsKeyDown(
+            psim.ImGuiKey_RightShift
+        )
+        control = psim.IsKeyDown(psim.ImGuiKey_LeftCtrl) or psim.IsKeyDown(
+            psim.ImGuiKey_RightCtrl
+        )
+        selected = set(region.edit_selected)
+        index = int(index)
+        if control:
+            if index in selected:
+                selected.remove(index)
+            else:
+                selected.add(index)
+        elif shift:
+            selected.add(index)
+        else:
+            selected = {index}
+        self._select_edit_nodes(region, sorted(selected))
+        ps.reset_selection()
+
+    def _sync_node_edit_gizmo(self, psim) -> None:
+        region = self.selected_region
+        if (
+            region is None
+            or not region.edit_mode
+            or not region.edit_selected
+            or region.edit_selection_structure is None
+            or region.edit_gizmo_transform is None
+        ):
+            return
+        try:
+            transform = np.asarray(
+                region.edit_selection_structure.get_transform(), dtype=float
+            )
+        except AttributeError:
+            return
+        if transform.shape != (4, 4):
+            return
+        if not np.allclose(transform, region.edit_gizmo_transform):
+            world_delta = transform[:3, 3] - region.edit_gizmo_transform[:3, 3]
+            if np.linalg.norm(world_delta) > 1e-12:
+                local_delta = np.linalg.solve(region.transform[:3, :3], world_delta)
+                region.edit_mouse_active = True
+                self._translate_selected_nodes(region, local_delta, kind="mouse")
+            region.edit_gizmo_transform = transform.copy()
+
+        mouse_down = psim.IsMouseDown(psim.ImGuiMouseButton_Left)
+        if region.edit_mouse_active and not mouse_down:
+            region.edit_mouse_active = False
+            region.edit_mouse_history = None
+            self._rebuild_edit_selection_structure(region)
 
     def remove_selected_region(self) -> None:
         region = self.selected_region
@@ -724,6 +1142,79 @@ class LungVizApplication:
         self.ct_volume = None
         self.message = "Scene cleared."
 
+    def _draw_node_edit_panel(self, psim, region: RegionState) -> None:
+        if not isinstance(region.scene, MeshScene):
+            return
+        changed, enabled = psim.Checkbox("Edit mesh nodes", region.edit_mode)
+        if changed:
+            self._set_edit_mode(region, enabled)
+        if not region.edit_mode:
+            return
+
+        psim.TextWrapped(
+            "Click a node handle to select it. Shift-click adds nodes and Ctrl-click "
+            "toggles them. Drag the selected nodes with the translation arrows."
+        )
+        if psim.Button("Select all nodes"):
+            self._select_edit_nodes(
+                region, range(region.scene.original_node_count)
+            )
+        psim.SameLine()
+        if psim.Button("Clear selection"):
+            self._select_edit_nodes(region, [])
+
+        selected_ids = region.scene.node_ids[
+            np.asarray(region.edit_selected, dtype=int)
+        ] if region.edit_selected else np.asarray([], dtype=int)
+        psim.TextUnformatted(f"Selected nodes: {len(selected_ids)}")
+        if selected_ids.size:
+            preview = ", ".join(str(value) for value in selected_ids[:8])
+            if len(selected_ids) > 8:
+                preview += ", ..."
+            psim.TextWrapped(f"Node IDs: {preview}")
+
+        changed, translation = psim.InputFloat3(
+            "Translation delta", region.edit_translation
+        )
+        if changed:
+            region.edit_translation = np.asarray(translation, dtype=float)
+        if psim.Button("Apply translation") and region.edit_selected:
+            try:
+                self._translate_selected_nodes(region, region.edit_translation)
+                region.edit_translation = np.zeros(3, dtype=float)
+            except (ExFileError, ValueError) as exc:
+                region.message = f"Could not move nodes: {exc}"
+
+        if len(region.edit_selected) == 1:
+            changed, absolute = psim.InputFloat3(
+                "Absolute position", region.edit_absolute
+            )
+            if changed:
+                region.edit_absolute = np.asarray(absolute, dtype=float)
+            if psim.Button("Set absolute position"):
+                try:
+                    self._set_node_positions(
+                        region, region.edit_selected, region.edit_absolute
+                    )
+                except (ExFileError, ValueError) as exc:
+                    region.message = f"Could not move node: {exc}"
+
+        if psim.Button("Undo node edit"):
+            self._undo_node_edit(region)
+        psim.SameLine()
+        if psim.Button("Redo node edit"):
+            self._redo_node_edit(region)
+        if psim.Button("Reset selected nodes"):
+            self._reset_selected_nodes(region)
+        psim.SameLine()
+        if psim.Button("Reset all nodes"):
+            self._reset_all_nodes(region)
+        if psim.Button("Export edited EXNODE..."):
+            try:
+                self.export_edited_exnode(region)
+            except (ExFileError, OSError) as exc:
+                region.message = f"Could not export EXNODE: {exc}"
+
     def _draw_region_panel(self, psim) -> None:
         if psim.Button("Load EX as new region..."):
             try:
@@ -777,6 +1268,7 @@ class LungVizApplication:
         changed, enabled = psim.Checkbox("Alignment transform gizmo", region.transform_gizmo)
         if changed:
             self._set_region_gizmo(region, enabled)
+        self._draw_node_edit_panel(psim, region)
 
         coordinate_options = coordinate_field_names(region.node_documents)
         if coordinate_options:
@@ -905,10 +1397,13 @@ class LungVizApplication:
                 psim.TreePop()
 
     def callback(self) -> None:
+        import polyscope as ps
         import polyscope.imgui as psim
 
         self._sync_region_transforms()
         self._sync_ct_slice_transforms()
+        self._sync_node_edit_gizmo(psim)
+        self._consume_node_pick(ps, psim)
         psim.TextUnformatted("LungViZ")
         psim.TextWrapped(self.message)
         psim.SeparatorText("EX regions")

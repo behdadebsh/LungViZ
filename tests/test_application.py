@@ -10,6 +10,7 @@ from LungViZ.application import (
     _sample_volume,
     _slice_geometry,
 )
+from LungViZ.exfile import parse_exnode
 from LungViZ.model import MeshScene, PointScene
 from LungViZ.volume import CTVolume
 
@@ -30,6 +31,8 @@ class FakeStructure:
         self.enabled = True
         self.vertices = None
         self.faces = None
+        self.points = None
+        self.node_positions = None
 
     def add_scalar_quantity(self, name, values, **options):
         self.scalars[name] = (values, options)
@@ -45,6 +48,12 @@ class FakeStructure:
 
     def update_vertex_positions(self, vertices):
         self.vertices = np.asarray(vertices)
+
+    def update_point_positions(self, points):
+        self.points = np.asarray(points)
+
+    def update_node_positions(self, nodes):
+        self.node_positions = np.asarray(nodes)
 
     def set_enabled(self, enabled):
         self.enabled = enabled
@@ -76,6 +85,7 @@ class FakeStructure:
 class FakePolyscope:
     def __init__(self):
         self.structures = {}
+        self.selection = None
 
     def remove_all_structures(self):
         self.structures.clear()
@@ -87,6 +97,7 @@ class FakePolyscope:
 
     def register_point_cloud(self, name, points, **options):
         structure = FakeStructure()
+        structure.points = np.asarray(points)
         self.structures[name] = structure
         return structure
 
@@ -97,6 +108,15 @@ class FakePolyscope:
         structure.enabled = options.get("enabled", True)
         self.structures[name] = structure
         return structure
+
+    def have_selection(self):
+        return self.selection is not None
+
+    def get_selection(self):
+        return self.selection
+
+    def reset_selection(self):
+        self.selection = None
 
 
 def test_application_loads_mesh_data_and_visual_quantities(monkeypatch):
@@ -162,6 +182,109 @@ Node: 2
     np.testing.assert_array_equal(landmark_region.scene.node_ids, [1, 2])
     np.testing.assert_allclose(landmark_region.scene.coordinates[0], [100, 200, 300])
     np.testing.assert_allclose(mesh_region.scene.coordinates[0], [0, 0, 0])
+
+
+def test_node_edit_translation_updates_connected_mesh_and_supports_history(
+    monkeypatch, tmp_path
+):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region(
+        [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
+    )
+    original = region.scene.coordinates[: region.scene.original_node_count].copy()
+    original_edges = region.scene.edges.copy()
+
+    app._set_edit_mode(region, True)
+    app._select_edit_nodes(region, [1, 3])
+    app._translate_selected_nodes(region, np.asarray([2.0, -1.0, 0.5]))
+
+    np.testing.assert_allclose(region.scene.coordinates[1], original[1] + [2, -1, 0.5])
+    np.testing.assert_allclose(region.scene.coordinates[3], original[3] + [2, -1, 0.5])
+    np.testing.assert_allclose(region.scene.coordinates[0], original[0])
+    np.testing.assert_array_equal(region.scene.edges, original_edges)
+    np.testing.assert_allclose(region.network.node_positions, region.scene.coordinates)
+    assert len(region.edit_undo) == 1
+
+    app._undo_node_edit(region)
+    np.testing.assert_allclose(
+        region.scene.coordinates[: region.scene.original_node_count], original
+    )
+    app._redo_node_edit(region)
+    np.testing.assert_allclose(region.scene.coordinates[1], original[1] + [2, -1, 0.5])
+
+    exported_path = app.export_edited_exnode(region, tmp_path / "edited.exnode")
+    exported = parse_exnode(exported_path)
+    np.testing.assert_allclose(
+        exported.nodes[1].fields["coordinates"], original[1] + [2, -1, 0.5]
+    )
+
+
+def test_mouse_gizmo_translation_is_live_and_coalesces_to_one_undo(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region(
+        [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
+    )
+    original = region.scene.coordinates[1].copy()
+    app._set_edit_mode(region, True)
+    app._select_edit_nodes(region, [1])
+
+    mouse = SimpleNamespace(
+        down=True,
+        ImGuiMouseButton_Left=0,
+        IsMouseDown=lambda _button: mouse.down,
+    )
+    selection = region.edit_selection_structure
+    selection.transform[0, 3] = 0.25
+    app._sync_node_edit_gizmo(mouse)
+    selection.transform[0, 3] = 0.50
+    app._sync_node_edit_gizmo(mouse)
+
+    np.testing.assert_allclose(region.scene.coordinates[1], original + [0.5, 0, 0])
+    assert len(region.edit_undo) == 1
+
+    mouse.down = False
+    app._sync_node_edit_gizmo(mouse)
+    app._undo_node_edit(region)
+    np.testing.assert_allclose(region.scene.coordinates[1], original)
+
+
+def test_mouse_pick_replaces_and_shift_adds_node_selection(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region(
+        [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
+    )
+    app._set_edit_mode(region, True)
+    keys_down = set()
+    psim = SimpleNamespace(
+        ImGuiKey_LeftShift=1,
+        ImGuiKey_RightShift=2,
+        ImGuiKey_LeftCtrl=3,
+        ImGuiKey_RightCtrl=4,
+        IsKeyDown=lambda key: key in keys_down,
+    )
+
+    fake.selection = SimpleNamespace(
+        structure_name=region.edit_handle_name,
+        structure_data={"index": 1},
+        local_index=1,
+    )
+    app._consume_node_pick(fake, psim)
+    assert region.edit_selected == [1]
+
+    keys_down.add(psim.ImGuiKey_LeftShift)
+    fake.selection = SimpleNamespace(
+        structure_name=region.edit_handle_name,
+        structure_data={"index": 3},
+        local_index=3,
+    )
+    app._consume_node_pick(fake, psim)
+    assert region.edit_selected == [1, 3]
 
 
 def test_element_flow_colours_edges_and_radius_controls_edge_thickness(

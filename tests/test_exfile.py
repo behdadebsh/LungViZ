@@ -3,7 +3,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from LungViZ.exfile import ExFileError, parse_exelem, parse_exnode
+from LungViZ.exfile import (
+    ExFileError,
+    parse_exelem,
+    parse_exnode,
+    write_exnode_coordinates,
+)
 
 
 EXAMPLES = Path(__file__).parents[1] / "examples"
@@ -72,6 +77,14 @@ Node: 2
     assert len(document.warnings) == 2
     assert "coordinates.y" in document.warnings[0]
 
+    document.nodes[0].fields["coordinates"][:] = [1.25, 2.5, 3.75]
+    exported_path = tmp_path / "repeated_indices_edited.exnode"
+    write_exnode_coordinates(document, exported_path, "coordinates")
+    np.testing.assert_allclose(
+        parse_exnode(exported_path).nodes[0].fields["coordinates"],
+        [1.25, 2.5, 3.75],
+    )
+
 
 def test_parse_exelem_connectivity():
     document = parse_exelem(EXAMPLES / "sample.exelem")
@@ -117,3 +130,19 @@ def test_node_without_field_header_is_rejected(tmp_path):
 
     with pytest.raises(ExFileError, match="no preceding #Fields"):
         parse_exnode(path)
+
+
+def test_export_edited_coordinates_preserves_other_node_fields(tmp_path):
+    document = parse_exnode(EXAMPLES / "sample.exnode")
+    document.nodes[1].fields["coordinates"][:] = [9.5, 8.5, 7.5]
+    destination = tmp_path / "edited.exnode"
+
+    write_exnode_coordinates(document, destination, "coordinates")
+    exported = parse_exnode(destination)
+
+    np.testing.assert_allclose(exported.nodes[1].fields["coordinates"], [9.5, 8.5, 7.5])
+    np.testing.assert_allclose(exported.nodes[1].fields["pressure"], [11.0])
+    np.testing.assert_allclose(
+        parse_exnode(EXAMPLES / "sample.exnode").nodes[1].fields["coordinates"],
+        [1.0, 0.0, 0.0],
+    )

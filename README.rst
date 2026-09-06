@@ -16,6 +16,8 @@ Features
 * Read grid-based ``Values:`` blocks as fields associated with mesh elements.
 * Colour a network by any nodal or element scalar field, vector component, or magnitude.
 * Render element radius fields as variable-radius tubes in physical mesh units.
+* Select one or many mesh nodes and move them with the mouse or an exact translation vector.
+* Undo, redo, reset, and export edited coordinates to a new ``.exnode`` file.
 * Display multi-component fields as Polyscope vectors.
 * Overlay ``.exdata`` locations and their fields as point clouds.
 * Display standalone ``.exnode`` regions as independent point clouds.
@@ -74,6 +76,16 @@ radius when both associations are available. Select ``Constant`` to return to
 uniform thickness. Colour only changes the selected colour map; tube radius is
 an independent geometric control. Flow is mapped linearly over its data range,
 which can be adjusted in Polyscope's Scene panel.
+
+Enable **Edit mesh nodes** to display pickable node handles. Click to replace
+the selection, Shift-click to add a node, or Ctrl-click to toggle one. The
+orange selection has a Polyscope translation gizmo for mouse movement. Enter a
+``Translation delta`` to add the same x, y, z displacement to every selected
+node; a single selected node also exposes its absolute position. Connected
+segments update without changing their connectivity, and cubic Hermite display
+samples are regenerated. Use undo, redo, or reset before choosing **Export
+edited EXNODE...**. Export preserves the loaded node file's headers, identifiers,
+derivatives, and non-coordinate fields and never overwrites the loaded file.
 
 For CT data, choose **Load DICOM folder...** or **Load NIfTI...**. DICOM pixel
 values are converted with their rescale slope/intercept, normally yielding

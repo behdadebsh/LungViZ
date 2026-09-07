@@ -221,6 +221,7 @@ class RegionState:
     edit_selected: List[int] = field(default_factory=list)
     edit_handles: object | None = None
     edit_selection_structure: object | None = None
+    edit_gizmo: object | None = None
     edit_handle_name: str = ""
     edit_selection_name: str = ""
     edit_original_coordinates: np.ndarray | None = None
@@ -378,6 +379,11 @@ class LungVizApplication:
                 region.transform = np.asarray(region.field_structure.get_transform())
             except AttributeError:
                 pass
+        if region.edit_gizmo is not None:
+            try:
+                region.edit_gizmo.remove()
+            except (AttributeError, RuntimeError):
+                pass
         for structure in region.structures:
             try:
                 structure.remove()
@@ -388,6 +394,7 @@ class LungVizApplication:
         region.network = None
         region.edit_handles = None
         region.edit_selection_structure = None
+        region.edit_gizmo = None
         region.edit_handle_name = ""
         region.edit_selection_name = ""
         region.edit_gizmo_transform = None
@@ -658,6 +665,13 @@ class LungVizApplication:
             region.network.set_node_radius_quantity(quantity_name, autoscale=False)
 
     def _remove_edit_selection_structure(self, region: RegionState) -> None:
+        gizmo = region.edit_gizmo
+        if gizmo is not None:
+            try:
+                gizmo.remove()
+            except (AttributeError, RuntimeError):
+                pass
+        region.edit_gizmo = None
         structure = region.edit_selection_structure
         if structure is not None:
             try:
@@ -712,10 +726,25 @@ class LungVizApplication:
             color=(1.0, 0.28, 0.04),
         )
         structure.set_transform(region.transform)
-        structure.set_transform_gizmo_enabled(True)
+        centroid = np.mean(coordinates, axis=0)
+        world_centroid = (
+            np.asarray(region.transform, dtype=float)
+            @ np.asarray([centroid[0], centroid[1], centroid[2], 1.0])
+        )[:3]
+        gizmo = ps.add_transformation_gizmo(
+            f"{region.name} / node translation gizmo / {region.key}"
+        )
+        gizmo.set_allow_translation(True)
+        gizmo.set_allow_rotation(False)
+        gizmo.set_allow_scaling(False)
+        gizmo.set_interact_in_local_space(False)
+        gizmo_transform = np.eye(4, dtype=float)
+        gizmo_transform[:3, 3] = world_centroid
+        gizmo.set_transform(gizmo_transform)
         region.edit_selection_structure = structure
+        region.edit_gizmo = gizmo
         region.edit_selection_name = name
-        region.edit_gizmo_transform = np.asarray(region.transform, dtype=float).copy()
+        region.edit_gizmo_transform = gizmo_transform.copy()
         region.structures.append(structure)
 
     def _create_edit_structures(self, region: RegionState) -> None:
@@ -825,6 +854,11 @@ class LungVizApplication:
         self._update_edit_handles(region)
         if update_selection_structure:
             self._rebuild_edit_selection_structure(region)
+        elif region.edit_selection_structure is not None and region.edit_selected:
+            selected = np.asarray(region.edit_selected, dtype=int)
+            region.edit_selection_structure.update_point_positions(
+                updated.coordinates[selected]
+            )
 
     def _set_node_positions(
         self,
@@ -970,12 +1004,18 @@ class LungVizApplication:
         if index is None or not 0 <= int(index) < region.scene.original_node_count:
             return
 
-        shift = psim.IsKeyDown(psim.ImGuiKey_LeftShift) or psim.IsKeyDown(
-            psim.ImGuiKey_RightShift
-        )
-        control = psim.IsKeyDown(psim.ImGuiKey_LeftCtrl) or psim.IsKeyDown(
-            psim.ImGuiKey_RightCtrl
-        )
+        try:
+            io = psim.GetIO()
+            shift = bool(io.KeyShift)
+            control = bool(io.KeyCtrl)
+        except AttributeError:
+            # Compatibility with older Polyscope/ImGui bindings.
+            shift = psim.IsKeyDown(psim.ImGuiKey_LeftShift) or psim.IsKeyDown(
+                psim.ImGuiKey_RightShift
+            )
+            control = psim.IsKeyDown(psim.ImGuiKey_LeftCtrl) or psim.IsKeyDown(
+                psim.ImGuiKey_RightCtrl
+            )
         selected = set(region.edit_selected)
         index = int(index)
         if control:
@@ -996,15 +1036,13 @@ class LungVizApplication:
             region is None
             or not region.edit_mode
             or not region.edit_selected
-            or region.edit_selection_structure is None
+            or region.edit_gizmo is None
             or region.edit_gizmo_transform is None
         ):
             return
         try:
-            transform = np.asarray(
-                region.edit_selection_structure.get_transform(), dtype=float
-            )
-        except AttributeError:
+            transform = np.asarray(region.edit_gizmo.get_transform(), dtype=float)
+        except (AttributeError, RuntimeError):
             return
         if transform.shape != (4, 4):
             return
@@ -1136,6 +1174,8 @@ class LungVizApplication:
         import polyscope as ps
 
         self._remove_ct()
+        for region in self.regions:
+            self._remove_region_structures(region)
         ps.remove_all_structures()
         self.regions.clear()
         self.selected_region_index = 0

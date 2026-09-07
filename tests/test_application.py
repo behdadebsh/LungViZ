@@ -82,9 +82,43 @@ class FakeStructure:
     def get_transform(self):
         return self.transform
 
+
+class FakeTransformationGizmo:
+    def __init__(self, name):
+        self.name = name
+        self.transform = np.eye(4)
+        self.allow_translation = True
+        self.allow_rotation = True
+        self.allow_scaling = True
+        self.interact_in_local_space = True
+        self.removed = False
+
+    def set_transform(self, transform):
+        self.transform = np.asarray(transform)
+
+    def get_transform(self):
+        return self.transform
+
+    def set_allow_translation(self, enabled):
+        self.allow_translation = enabled
+
+    def set_allow_rotation(self, enabled):
+        self.allow_rotation = enabled
+
+    def set_allow_scaling(self, enabled):
+        self.allow_scaling = enabled
+
+    def set_interact_in_local_space(self, enabled):
+        self.interact_in_local_space = enabled
+
+    def remove(self):
+        self.removed = True
+
+
 class FakePolyscope:
     def __init__(self):
         self.structures = {}
+        self.gizmos = {}
         self.selection = None
 
     def remove_all_structures(self):
@@ -108,6 +142,11 @@ class FakePolyscope:
         structure.enabled = options.get("enabled", True)
         self.structures[name] = structure
         return structure
+
+    def add_transformation_gizmo(self, name):
+        gizmo = FakeTransformationGizmo(name)
+        self.gizmos[name] = gizmo
+        return gizmo
 
     def have_selection(self):
         return self.selection is not None
@@ -228,28 +267,39 @@ def test_mouse_gizmo_translation_is_live_and_coalesces_to_one_undo(monkeypatch):
     region = app.load_region(
         [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
     )
-    original = region.scene.coordinates[1].copy()
+    original = region.scene.coordinates[[1, 3]].copy()
     app._set_edit_mode(region, True)
-    app._select_edit_nodes(region, [1])
+    app._select_edit_nodes(region, [1, 3])
 
     mouse = SimpleNamespace(
         down=True,
         ImGuiMouseButton_Left=0,
         IsMouseDown=lambda _button: mouse.down,
     )
-    selection = region.edit_selection_structure
-    selection.transform[0, 3] = 0.25
+    gizmo = region.edit_gizmo
+    assert gizmo is not None
+    assert gizmo.allow_translation
+    assert not gizmo.allow_rotation
+    assert not gizmo.allow_scaling
+    assert not gizmo.interact_in_local_space
+    gizmo.transform[0, 3] += 0.25
     app._sync_node_edit_gizmo(mouse)
-    selection.transform[0, 3] = 0.50
+    gizmo.transform[0, 3] += 0.25
     app._sync_node_edit_gizmo(mouse)
 
-    np.testing.assert_allclose(region.scene.coordinates[1], original + [0.5, 0, 0])
+    np.testing.assert_allclose(
+        region.scene.coordinates[[1, 3]], original + [0.5, 0, 0]
+    )
+    np.testing.assert_allclose(
+        region.edit_selection_structure.points,
+        region.scene.coordinates[[1, 3]],
+    )
     assert len(region.edit_undo) == 1
 
     mouse.down = False
     app._sync_node_edit_gizmo(mouse)
     app._undo_node_edit(region)
-    np.testing.assert_allclose(region.scene.coordinates[1], original)
+    np.testing.assert_allclose(region.scene.coordinates[[1, 3]], original)
 
 
 def test_mouse_pick_replaces_and_shift_adds_node_selection(monkeypatch):
@@ -260,13 +310,14 @@ def test_mouse_pick_replaces_and_shift_adds_node_selection(monkeypatch):
         [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
     )
     app._set_edit_mode(region, True)
-    keys_down = set()
+    io = SimpleNamespace(KeyShift=False, KeyCtrl=False)
     psim = SimpleNamespace(
+        GetIO=lambda: io,
         ImGuiKey_LeftShift=1,
         ImGuiKey_RightShift=2,
         ImGuiKey_LeftCtrl=3,
         ImGuiKey_RightCtrl=4,
-        IsKeyDown=lambda key: key in keys_down,
+        IsKeyDown=lambda _key: False,
     )
 
     fake.selection = SimpleNamespace(
@@ -277,7 +328,7 @@ def test_mouse_pick_replaces_and_shift_adds_node_selection(monkeypatch):
     app._consume_node_pick(fake, psim)
     assert region.edit_selected == [1]
 
-    keys_down.add(psim.ImGuiKey_LeftShift)
+    io.KeyShift = True
     fake.selection = SimpleNamespace(
         structure_name=region.edit_handle_name,
         structure_data={"index": 3},
@@ -285,6 +336,16 @@ def test_mouse_pick_replaces_and_shift_adds_node_selection(monkeypatch):
     )
     app._consume_node_pick(fake, psim)
     assert region.edit_selected == [1, 3]
+
+    io.KeyShift = False
+    io.KeyCtrl = True
+    fake.selection = SimpleNamespace(
+        structure_name=region.edit_handle_name,
+        structure_data={"index": 1},
+        local_index=1,
+    )
+    app._consume_node_pick(fake, psim)
+    assert region.edit_selected == [3]
 
 
 def test_element_flow_colours_edges_and_radius_controls_edge_thickness(

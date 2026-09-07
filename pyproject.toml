@@ -14,7 +14,7 @@ dependencies = [
   "nibabel>=5.1",
   "numpy>=1.23",
   "pydicom>=2.4",
-  "polyscope>=2.4",
+  "polyscope>=2.6.1",
 ]
 
 [project.optional-dependencies]

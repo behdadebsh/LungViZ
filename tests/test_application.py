@@ -11,7 +11,7 @@ from LungViZ.application import (
     _slice_geometry,
 )
 from LungViZ.exfile import parse_exnode
-from LungViZ.model import MeshScene, PointScene
+from LungViZ.model import MeshScene, PointScene, SurfaceScene
 from LungViZ.volume import CTVolume
 
 
@@ -29,6 +29,7 @@ class FakeStructure:
         self.gizmo_enabled = False
         self.transform = np.eye(4)
         self.enabled = True
+        self.transparency = 1.0
         self.vertices = None
         self.faces = None
         self.points = None
@@ -57,6 +58,9 @@ class FakeStructure:
 
     def set_enabled(self, enabled):
         self.enabled = enabled
+
+    def set_transparency(self, transparency):
+        self.transparency = transparency
 
     def set_node_radius_quantity(self, name, autoscale=True):
         self.radius_quantity = (name, autoscale)
@@ -141,8 +145,30 @@ class FakePolyscope:
         structure.vertices = np.asarray(vertices)
         structure.faces = np.asarray(faces)
         structure.enabled = options.get("enabled", True)
+        structure.transparency = options.get("transparency", 1.0)
         self.structures[name] = structure
         return structure
+
+    def set_program_name(self, name):
+        self.program_name = name
+
+    def init(self):
+        self.initialized = True
+
+    def set_ground_plane_mode(self, mode):
+        self.ground_plane_mode = mode
+
+    def set_navigation_style(self, style):
+        self.navigation_style = style
+
+    def set_files_dropped_callback(self, callback):
+        self.files_dropped_callback = callback
+
+    def set_user_callback(self, callback):
+        self.user_callback = callback
+
+    def show(self):
+        self.shown = True
 
     def add_transformation_gizmo(self, name):
         gizmo = FakeTransformationGizmo(name)
@@ -302,6 +328,71 @@ def test_standalone_exnode_and_exdata_regions_can_edit_points(monkeypatch):
     np.testing.assert_allclose(
         data_region.field_structure.points, data_region.scene.coordinates
     )
+
+
+def test_stl_and_ply_load_as_independent_transparent_surface_regions(
+    monkeypatch, tmp_path
+):
+    stl_path = tmp_path / "wall.stl"
+    stl_path.write_text(
+        """solid wall
+facet normal 0 0 1
+ outer loop
+  vertex 0 0 0
+  vertex 1 0 0
+  vertex 0 1 0
+ endloop
+endfacet
+endsolid wall
+""",
+        encoding="utf-8",
+    )
+    ply_path = tmp_path / "surface.ply"
+    ply_path.write_text(
+        """ply
+format ascii 1.0
+element vertex 4
+property float x
+property float y
+property float z
+element face 2
+property list uchar int vertex_indices
+end_header
+0 0 0
+1 0 0
+1 1 0
+0 1 0
+3 0 1 2
+3 0 2 3
+""",
+        encoding="utf-8",
+    )
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+
+    regions = app.load_files_as_regions([stl_path, ply_path])
+
+    assert len(regions) == 2
+    assert all(isinstance(region.scene, SurfaceScene) for region in regions)
+    assert len(regions[0].scene.faces) == 1
+    assert len(regions[1].scene.faces) == 2
+    assert regions[0].field_structure.transparency == 0.65
+    app._set_surface_opacity(regions[0], 0.25)
+    assert regions[0].surface_opacity == 0.25
+    assert regions[0].field_structure.transparency == 0.25
+    assert regions[1].field_structure.transparency == 0.65
+
+
+def test_run_uses_free_camera_and_installs_file_drop_loader(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+
+    app.run()
+
+    assert fake.navigation_style == "free"
+    assert fake.files_dropped_callback == app._files_dropped
 
 
 def test_mouse_gizmo_translation_is_live_and_coalesces_to_one_undo(monkeypatch):

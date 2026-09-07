@@ -11,7 +11,7 @@ from typing import Dict, List, Sequence
 import numpy as np
 
 from .exfile import ExFileError, load_ex_file, write_exnode_coordinates
-from .model import ElementDocument, MeshScene, NodeDocument, PointScene
+from .model import ElementDocument, MeshScene, NodeDocument, PointScene, SurfaceScene
 from .scene import (
     build_mesh_scene,
     build_point_scene,
@@ -19,11 +19,12 @@ from .scene import (
     edge_scalar_variants,
     scalar_variants,
 )
+from .surface import SURFACE_EXTENSIONS, load_surface_scene
 from .volume import CTVolume, load_dicom_directory, load_nifti
 
 
 def choose_ex_files() -> Sequence[str]:
-    """Choose the files which make up one isolated EX region."""
+    """Choose EX or triangulated-surface files for a new region."""
 
     import tkinter as tk
     from tkinter import filedialog
@@ -33,9 +34,11 @@ def choose_ex_files() -> Sequence[str]:
     root.attributes("-topmost", True)
     try:
         return filedialog.askopenfilenames(
-            title="Load one EX region",
+            title="Load EX or surface geometry",
             filetypes=[
+                ("Supported geometry", "*.exnode *.exelem *.exdata *.stl *.ply"),
                 ("OpenCMISS EX files", "*.exnode *.exelem *.exdata"),
+                ("Triangulated surfaces", "*.stl *.ply"),
                 ("All files", "*.*"),
             ],
         )
@@ -210,8 +213,9 @@ class RegionState:
     node_documents: List[NodeDocument] = field(default_factory=list)
     data_documents: List[NodeDocument] = field(default_factory=list)
     element_documents: List[ElementDocument] = field(default_factory=list)
+    surface_paths: List[Path] = field(default_factory=list)
     edit_documents: List[NodeDocument] = field(default_factory=list)
-    scene: MeshScene | PointScene | None = None
+    scene: MeshScene | PointScene | SurfaceScene | None = None
     structures: List[object] = field(default_factory=list)
     field_structure: object | None = None
     field_structure_name: str = ""
@@ -224,6 +228,7 @@ class RegionState:
     scalar_index: int = 0
     radius_index: int = 0
     transform_gizmo: bool = False
+    surface_opacity: float = 0.65
     transform: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=float))
     message: str = ""
     warnings: List[str] = field(default_factory=list)
@@ -312,6 +317,10 @@ class LungVizApplication:
             if path in region.paths:
                 continue
             try:
+                if path.suffix.lower() in SURFACE_EXTENSIONS:
+                    region.paths.append(path)
+                    region.surface_paths.append(path)
+                    continue
                 document = load_ex_file(path)
             except (ExFileError, OSError) as exc:
                 errors.append(f"{path.name}: {exc}")
@@ -324,6 +333,33 @@ class LungVizApplication:
             else:
                 region.node_documents.append(document)
         return errors
+
+    def load_files_as_regions(
+        self, paths: Sequence[str | Path]
+    ) -> List[RegionState]:
+        """Load EX files together and each surface as an independent region."""
+
+        ex_paths: List[str | Path] = []
+        surface_paths: List[str | Path] = []
+        for raw_path in paths:
+            path = Path(raw_path)
+            if path.suffix.lower() in SURFACE_EXTENSIONS:
+                surface_paths.append(raw_path)
+            else:
+                ex_paths.append(raw_path)
+        loaded: List[RegionState] = []
+        if ex_paths:
+            region = self.load_region(ex_paths)
+            if region is not None:
+                loaded.append(region)
+        for surface_path in surface_paths:
+            region = self.load_region([surface_path])
+            if region is not None:
+                loaded.append(region)
+        return loaded
+
+    def _files_dropped(self, paths: Sequence[str]) -> None:
+        self.load_files_as_regions(paths)
 
     def load_region(
         self, paths: Sequence[str | Path], name: str | None = None
@@ -607,6 +643,38 @@ class LungVizApplication:
             region.structures.append(cloud)
             region.warnings.extend(points.warnings)
 
+        if region.surface_paths:
+            try:
+                surface = load_surface_scene(region.surface_paths)
+                structure_name = f"{region.name} / triangulated surface"
+                surface_structure = ps.register_surface_mesh(
+                    structure_name,
+                    surface.vertices,
+                    surface.faces,
+                    smooth_shade=True,
+                    transparency=region.surface_opacity,
+                )
+                region.scene = surface
+                region.edit_documents = []
+                region.network = None
+                region.field_structure = surface_structure
+                region.field_structure_name = structure_name
+                region.scalar_values.clear()
+                region.scalar_locations.clear()
+                region.structures.append(surface_structure)
+                region.warnings.extend(surface.warnings)
+                if region.node_documents or region.element_documents or region.data_documents:
+                    region.warnings.append(
+                        "Surface and EX files were loaded together. Load them as separate "
+                        "regions for independent controls."
+                    )
+                region.message = (
+                    f"{len(surface.vertices)} surface vertices, "
+                    f"{len(surface.faces)} triangles"
+                )
+            except ExFileError as exc:
+                region.message = f"Surface could not be built: {exc}"
+
         region.scalar_options = list(region.scalar_values)
         region.radius_options = ["Constant"] + region.scalar_options
         region.scalar_index = min(
@@ -711,6 +779,12 @@ class LungVizApplication:
             region.network.set_edge_radius_quantity(quantity_name, autoscale=False)
         else:
             region.network.set_node_radius_quantity(quantity_name, autoscale=False)
+
+    def _set_surface_opacity(self, region: RegionState, opacity: float) -> None:
+        if not isinstance(region.scene, SurfaceScene) or region.field_structure is None:
+            return
+        region.surface_opacity = float(np.clip(opacity, 0.0, 1.0))
+        region.field_structure.set_transparency(region.surface_opacity)
 
     def _remove_edit_selection_structure(self, region: RegionState) -> None:
         gizmo = region.edit_gizmo
@@ -1368,16 +1442,16 @@ class LungVizApplication:
             try:
                 self.export_edited_exnode(region)
             except (ExFileError, OSError) as exc:
-                region.message = f"Could not export EXNODE: {exc}"
+                region.message = f"Could not export EX file: {exc}"
 
     def _draw_region_panel(self, psim) -> None:
-        if psim.Button("Load EX as new region..."):
+        if psim.Button("Load geometry as new region..."):
             try:
                 selected = choose_ex_files()
                 if selected:
-                    self.load_region(selected)
+                    self.load_files_as_regions(selected)
             except Exception as exc:
-                self.message = f"Could not load EX region: {exc}"
+                self.message = f"Could not load geometry region: {exc}"
 
         region = self.selected_region
         if self.regions:
@@ -1419,6 +1493,20 @@ class LungVizApplication:
             psim.TextUnformatted(f"Segments: {len(region.scene.edges)}")
         elif isinstance(region.scene, PointScene):
             psim.TextUnformatted(f"Points: {len(region.scene.node_ids)}")
+        elif isinstance(region.scene, SurfaceScene):
+            psim.TextUnformatted(f"Surface vertices: {len(region.scene.vertices)}")
+            psim.TextUnformatted(f"Triangles: {len(region.scene.faces)}")
+
+        if isinstance(region.scene, SurfaceScene):
+            changed, opacity = psim.SliderFloat(
+                "Surface opacity", region.surface_opacity, 0.0, 1.0
+            )
+            if changed:
+                self._set_surface_opacity(region, opacity)
+            psim.TextWrapped(
+                "Opacity is independent for each surface region: 0 is transparent "
+                "and 1 is opaque."
+            )
 
         changed, enabled = psim.Checkbox("Alignment transform gizmo", region.transform_gizmo)
         if changed:
@@ -1561,7 +1649,7 @@ class LungVizApplication:
         self._consume_node_pick(ps, psim)
         psim.TextUnformatted("LungViZ")
         psim.TextWrapped(self.message)
-        psim.SeparatorText("EX regions")
+        psim.SeparatorText("Geometry regions")
         self._draw_region_panel(psim)
         psim.SeparatorText("CT volume")
         self._draw_ct_panel(psim)
@@ -1579,8 +1667,10 @@ class LungVizApplication:
         ps.set_program_name("LungViZ")
         ps.init()
         ps.set_ground_plane_mode("none")
+        ps.set_navigation_style("free")
+        ps.set_files_dropped_callback(self._files_dropped)
         if initial_paths:
-            self.load_region(initial_paths)
+            self.load_files_as_regions(initial_paths)
         ps.set_user_callback(self.callback)
         ps.show()
 
@@ -1588,7 +1678,10 @@ class LungVizApplication:
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lungviz",
-        description="Inspect regional OpenCMISS EX data and CT volumes in Polyscope.",
+        description=(
+            "Inspect OpenCMISS EX data, triangulated surfaces, and CT volumes "
+            "in Polyscope."
+        ),
     )
     parser.add_argument(
         "files",

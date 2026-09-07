@@ -15,6 +15,7 @@ dependencies = [
   "numpy>=1.23",
   "pydicom>=2.4",
   "polyscope>=2.6.1",
+  "trimesh>=4.0",
 ]
 
 [project.optional-dependencies]

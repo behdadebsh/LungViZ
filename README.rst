@@ -4,8 +4,9 @@ LungViZ
 ***************
 
 LungViZ is an interactive viewer for regional one-dimensional OpenCMISS/CMGUI
-meshes and medical image volumes. It displays ``.exnode``, ``.exelem``, and
-``.exdata`` data together with DICOM or NIfTI CT images in a Polyscope window.
+meshes, triangulated surfaces, and medical image volumes. It displays
+``.exnode``, ``.exelem``, ``.exdata``, STL, and PLY geometry together with
+DICOM or NIfTI CT images in a Polyscope window.
 
 Features
 --------
@@ -21,11 +22,14 @@ Features
 * Display multi-component fields as Polyscope vectors.
 * Overlay ``.exdata`` locations and their fields as point clouds.
 * Display standalone ``.exnode`` regions as independent point clouds.
+* Load STL and PLY triangle surfaces with independent adjustable opacity.
+* Drop supported geometry files directly into the Polyscope window.
 * Load a DICOM series folder or NIfTI CT volume using patient/world coordinates.
 * Inspect CT intensity on grayscale axial, coronal, and sagittal planes without drawing a solid volume.
 * Show, hide, slide, translate, or rotate each CT plane independently, or unload the CT.
 * Interactively transform a mesh region to align it with the CT when coordinate frames differ.
 * Continue using Polyscope's native picking, camera, screenshot, colour-map, and structure controls.
+* Start with free-orientation camera navigation by default.
 
 Installation
 ------------
@@ -60,12 +64,20 @@ Or try the included small branching airway example::
 Usage notes
 -----------
 
-Click **Load EX as new region...** and select the files belonging to one mesh.
+Click **Load geometry as new region...** and select the files belonging to one mesh.
 Every new-region operation creates a separate node-number namespace, so another
 exnode file containing the same node identifiers cannot overwrite that mesh.
 If the coordinate and connectivity files are selected at different times, use
 **Add files to region...** for the second selection. An exnode-only region is
 shown as a point cloud.
+
+The same loader accepts triangulated STL and PLY surface files. Each selected
+surface file becomes an independent region with its own **Surface opacity**
+slider and alignment transform. Opacity ranges from 0 (transparent) to 1
+(opaque) and starts at 0.65 so an EX network or CT slice can remain visible
+through the surface. Files can also be dropped directly into the Polyscope
+window. LungViZ starts with Polyscope's **Free** camera navigation style; it can
+still be changed from the standard View menu.
 
 Use **Colour by** and **Tube radius** for the most common field
 visualisations. The standard Polyscope Scene panel exposes every imported

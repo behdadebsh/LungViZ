@@ -116,3 +116,10 @@ class PointScene:
     fields: Dict[str, SceneField]
     coordinate_field: str
     warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SurfaceScene:
+    vertices: np.ndarray
+    faces: np.ndarray
+    warnings: List[str] = field(default_factory=list)

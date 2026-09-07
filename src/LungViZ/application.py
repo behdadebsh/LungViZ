@@ -136,6 +136,30 @@ def _finite_for_display(values: np.ndarray) -> np.ndarray:
     return np.nan_to_num(values, nan=replacement, posinf=replacement, neginf=replacement)
 
 
+def _edge_radii_to_node_radii(
+    edge_radii: np.ndarray, edges: np.ndarray, node_count: int
+) -> np.ndarray:
+    """Derive display-only shared radii so incident tubes meet continuously."""
+
+    radii = np.asarray(edge_radii, dtype=float).reshape(-1)
+    connectivity = np.asarray(edges, dtype=int)
+    if radii.size != len(connectivity):
+        raise ValueError("Each rendered edge must have one radius")
+    squared_sum = np.zeros(node_count, dtype=float)
+    incident_count = np.zeros(node_count, dtype=int)
+    squared = np.square(np.clip(radii, 0.0, None))
+    np.add.at(squared_sum, connectivity[:, 0], squared)
+    np.add.at(squared_sum, connectivity[:, 1], squared)
+    np.add.at(incident_count, connectivity[:, 0], 1)
+    np.add.at(incident_count, connectivity[:, 1], 1)
+    node_radii = np.zeros(node_count, dtype=float)
+    connected = incident_count > 0
+    node_radii[connected] = np.sqrt(
+        squared_sum[connected] / incident_count[connected]
+    )
+    return node_radii
+
+
 def _display_indices(size: int, maximum: int = 384) -> np.ndarray:
     if size <= maximum:
         return np.arange(size, dtype=int)
@@ -256,6 +280,7 @@ class RegionState:
     scalar_index: int = 0
     radius_index: int = 0
     radius_scale: float = 0.25
+    smooth_radius_joins: bool = True
     transform_gizmo: bool = False
     surface_opacity: float = 0.65
     transform: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=float))
@@ -806,6 +831,20 @@ class LungVizApplication:
         )
         quantity_name = f"radius: {name}"
         location = region.scalar_locations.get(name, "nodes")
+        if (
+            location == "edges"
+            and region.smooth_radius_joins
+            and isinstance(region.scene, MeshScene)
+        ):
+            quantity_name = f"smoothed radius: {name}"
+            node_values = _edge_radii_to_node_radii(
+                values, region.scene.edges, len(region.scene.coordinates)
+            )
+            region.network.add_scalar_quantity(
+                quantity_name, node_values, defined_on="nodes", enabled=False
+            )
+            region.network.set_node_radius_quantity(quantity_name, autoscale=False)
+            return
         region.network.add_scalar_quantity(
             quantity_name, values, defined_on=location, enabled=False
         )
@@ -1691,6 +1730,17 @@ class LungVizApplication:
                     self._set_radius(region)
                 if region.radius_index > 0:
                     radius_name = region.radius_options[region.radius_index]
+                    if region.scalar_locations.get(radius_name) == "edges":
+                        changed, smooth_joins = psim.Checkbox(
+                            "Smooth tube joins", region.smooth_radius_joins
+                        )
+                        if changed:
+                            region.smooth_radius_joins = smooth_joins
+                            self._set_radius(region)
+                        psim.TextWrapped(
+                            "Display only: uses shared node radii and tapered segments. "
+                            "The loaded geometry, connectivity, and radius field are unchanged."
+                        )
                     raw_radius = region.scalar_values[radius_name]
                     finite_radius = raw_radius[np.isfinite(raw_radius)]
                     if finite_radius.size:

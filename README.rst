@@ -96,6 +96,14 @@ without changing the imported data. It uses a logarithmic range from 0.001 to
 branches. Choose **Use physical radius (1 x)** whenever the radius and coordinate
 files use compatible units and true physical scale is desired.
 
+For element-based radii, **Smooth tube joins** derives temporary shared node
+radii and draws tapered segments so neighbouring vessels meet continuously. The
+calculation uses the root-mean-square of incident element radii, retaining more
+of the larger vessel at a junction without using oversized maximum-radius joins.
+This is purely a rendering option: node coordinates, element connectivity,
+imported fields, editing, and exported EX files are unchanged. Turn it off to
+restore exact constant-radius cylinders for each element.
+
 Use Polyscope's single **Screenshot** button to choose an explicit PNG or JPEG
 filename and folder; ``Ctrl+Shift+S`` opens the same Save As workflow. The
 button's adjacent menu still controls its file format and transparent-background

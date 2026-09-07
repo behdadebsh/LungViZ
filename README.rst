@@ -96,9 +96,9 @@ without changing the imported data. It uses a logarithmic range from 0.001 to
 branches. Choose **Use physical radius (1 x)** whenever the radius and coordinate
 files use compatible units and true physical scale is desired.
 
-Use **Save screenshot as...** to choose an explicit PNG or JPEG filename and
-folder. The adjacent option controls whether PNG screenshots have a transparent
-background. The rendered image excludes the interface panels.
+Use Polyscope's single **Screenshot** button for a quick capture, or press
+``Ctrl+Shift+S`` to choose an explicit PNG or JPEG filename and folder. Named
+captures exclude the interface panels.
 
 Enable **Edit nodes / data points** to display pickable handles for a 1D mesh,
 standalone EXNODE region, or EXDATA-only region. Click to replace the selection,

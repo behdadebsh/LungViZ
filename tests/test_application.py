@@ -427,6 +427,21 @@ def test_named_screenshot_uses_selected_path_and_background(monkeypatch, tmp_pat
     assert fake.saved_screenshot == (str(jpg_destination.resolve()), False, False)
 
 
+def test_named_screenshot_shortcut_uses_save_dialog(monkeypatch):
+    app = LungVizApplication()
+    saved = []
+    monkeypatch.setattr(app, "save_screenshot", lambda: saved.append(True))
+    psim = SimpleNamespace(
+        ImGuiKey_S=83,
+        GetIO=lambda: SimpleNamespace(KeyCtrl=True, KeyShift=True),
+        IsKeyPressed=lambda key, repeat: key == 83 and repeat is False,
+    )
+
+    app._consume_screenshot_shortcut(psim)
+
+    assert saved == [True]
+
+
 def test_mouse_gizmo_translation_is_live_and_coalesces_to_one_undo(monkeypatch):
     fake = FakePolyscope()
     monkeypatch.setitem(sys.modules, "polyscope", fake)

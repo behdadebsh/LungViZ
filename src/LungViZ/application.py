@@ -841,6 +841,21 @@ class LungVizApplication:
         self.message = f"Saved screenshot to {target}."
         return target
 
+    def _consume_screenshot_shortcut(self, psim) -> None:
+        """Open the named screenshot dialog without duplicating Polyscope's button."""
+
+        io = psim.GetIO()
+        if not (
+            io.KeyCtrl
+            and io.KeyShift
+            and psim.IsKeyPressed(psim.ImGuiKey_S, False)
+        ):
+            return
+        try:
+            self.save_screenshot()
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.message = f"Could not save screenshot: {exc}"
+
     def _remove_edit_selection_structure(self, region: RegionState) -> None:
         gizmo = region.edit_gizmo
         if gizmo is not None:
@@ -1726,30 +1741,20 @@ class LungVizApplication:
         self._sync_ct_slice_transforms()
         self._sync_node_edit_gizmo(psim)
         self._consume_node_pick(ps, psim)
+        self._consume_screenshot_shortcut(psim)
         psim.TextUnformatted("LungViZ")
         psim.TextWrapped(self.message)
         psim.SeparatorText("Geometry regions")
         self._draw_region_panel(psim)
         psim.SeparatorText("CT volume")
         self._draw_ct_panel(psim)
-        psim.SeparatorText("Screenshot")
-        changed, transparent = psim.Checkbox(
-            "Transparent background", self.screenshot_transparent_background
-        )
-        if changed:
-            self.screenshot_transparent_background = transparent
-        if psim.Button("Save screenshot as..."):
-            try:
-                self.save_screenshot()
-            except (OSError, RuntimeError, ValueError) as exc:
-                self.message = f"Could not save screenshot: {exc}"
-        psim.TextWrapped("Saves the rendered view without the interface panels.")
         psim.Separator()
         if psim.Button("Clear everything"):
             self.clear()
         psim.TextWrapped(
             "Polyscope's Scene panel provides picking, field colour maps, screenshots, "
-            "visibility, and per-structure options."
+            "visibility, and per-structure options. Press Ctrl+Shift+S for a named "
+            "screenshot in a chosen folder."
         )
 
     def run(self, initial_paths: Sequence[str | Path] = ()) -> None:

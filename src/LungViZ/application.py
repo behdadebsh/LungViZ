@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 from dataclasses import dataclass, field
 from itertools import permutations
 from pathlib import Path
@@ -102,7 +103,7 @@ def choose_exnode_export_path(source: Path) -> str:
         root.destroy()
 
 
-def choose_screenshot_path() -> str:
+def choose_screenshot_path(default_extension: str = ".png") -> str:
     """Choose a named PNG or JPEG destination for the current view."""
 
     import tkinter as tk
@@ -111,12 +112,15 @@ def choose_screenshot_path() -> str:
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
+    default_extension = default_extension.lower()
+    if default_extension not in {".png", ".jpg"}:
+        default_extension = ".png"
     try:
         return filedialog.asksaveasfilename(
             title="Save LungViZ screenshot",
             initialdir=str(Path.cwd()),
-            initialfile="lungviz_view.png",
-            defaultextension=".png",
+            initialfile=f"lungviz_view{default_extension}",
+            defaultextension=default_extension,
             filetypes=[
                 ("PNG image", "*.png"),
                 ("JPEG image", "*.jpg"),
@@ -308,6 +312,7 @@ class LungVizApplication:
         self._node_pick_shift = False
         self._node_pick_control = False
         self.screenshot_transparent_background = False
+        self._native_screenshot_snapshot: Dict[Path, tuple[int, int]] | None = None
         self.message = "Load each mesh or standalone node set as its own region."
 
     @property
@@ -838,8 +843,66 @@ class LungVizApplication:
             transparent_bg=transparent_background,
             include_UI=False,
         )
+        if self._native_screenshot_snapshot is not None:
+            self._native_screenshot_snapshot = self._native_screenshot_files()
         self.message = f"Saved screenshot to {target}."
         return target
+
+    @staticmethod
+    def _native_screenshot_files() -> Dict[Path, tuple[int, int]]:
+        """Return signatures for files created by Polyscope's native button."""
+
+        screenshots: Dict[Path, tuple[int, int]] = {}
+        for extension in ("png", "jpg"):
+            for path in Path.cwd().glob(f"screenshot_*.{extension}"):
+                index = path.stem.removeprefix("screenshot_")
+                if len(index) != 6 or not index.isdigit():
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                screenshots[path.resolve()] = (stat.st_mtime_ns, stat.st_size)
+        return screenshots
+
+    def _consume_native_screenshot(self) -> None:
+        """Turn a native numbered screenshot into an interactive Save As action."""
+
+        current = self._native_screenshot_files()
+        previous = self._native_screenshot_snapshot
+        self._native_screenshot_snapshot = current
+        if previous is None:
+            return
+        changed = [
+            path for path, signature in current.items() if previous.get(path) != signature
+        ]
+        if not changed:
+            return
+
+        source = max(changed, key=lambda path: current[path][0])
+        try:
+            destination = choose_screenshot_path(source.suffix)
+            if not destination:
+                self.message = f"Screenshot kept at {source}."
+                return
+            target = Path(destination).expanduser().resolve()
+            if not target.suffix:
+                target = target.with_suffix(source.suffix)
+            if target.suffix.lower() not in {".png", ".jpg"}:
+                raise ValueError("Screenshots must use a .png or .jpg extension")
+            if target == source:
+                self.message = f"Saved screenshot to {target}."
+            elif target.suffix.lower() == source.suffix.lower():
+                shutil.copyfile(source, target)
+                source.unlink()
+                self.message = f"Saved screenshot to {target}."
+            else:
+                self.save_screenshot(target)
+                source.unlink()
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.message = f"Could not rename screenshot; it remains at {source}: {exc}"
+        finally:
+            self._native_screenshot_snapshot = self._native_screenshot_files()
 
     def _consume_screenshot_shortcut(self, psim) -> None:
         """Open the named screenshot dialog without duplicating Polyscope's button."""
@@ -1741,6 +1804,7 @@ class LungVizApplication:
         self._sync_ct_slice_transforms()
         self._sync_node_edit_gizmo(psim)
         self._consume_node_pick(ps, psim)
+        self._consume_native_screenshot()
         self._consume_screenshot_shortcut(psim)
         psim.TextUnformatted("LungViZ")
         psim.TextWrapped(self.message)
@@ -1762,6 +1826,7 @@ class LungVizApplication:
 
         ps.set_program_name("LungViZ")
         ps.init()
+        self._native_screenshot_snapshot = self._native_screenshot_files()
         ps.set_ground_plane_mode("none")
         ps.set_navigation_style("free")
         ps.set_files_dropped_callback(self._files_dropped)

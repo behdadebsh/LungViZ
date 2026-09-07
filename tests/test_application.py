@@ -442,6 +442,42 @@ def test_named_screenshot_shortcut_uses_save_dialog(monkeypatch):
     assert saved == [True]
 
 
+def test_native_screenshot_button_opens_save_as_and_moves_capture(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    app = LungVizApplication()
+    app._native_screenshot_snapshot = app._native_screenshot_files()
+    native_capture = tmp_path / "screenshot_000000.png"
+    native_capture.write_bytes(b"native screenshot")
+    destination = tmp_path / "named-airway.png"
+    monkeypatch.setattr(
+        "LungViZ.application.choose_screenshot_path", lambda extension: str(destination)
+    )
+
+    app._consume_native_screenshot()
+
+    assert destination.read_bytes() == b"native screenshot"
+    assert not native_capture.exists()
+    assert str(destination.resolve()) in app.message
+
+
+def test_cancelled_native_screenshot_keeps_numbered_capture(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    app = LungVizApplication()
+    app._native_screenshot_snapshot = app._native_screenshot_files()
+    native_capture = tmp_path / "screenshot_000000.jpg"
+    native_capture.write_bytes(b"native screenshot")
+    monkeypatch.setattr(
+        "LungViZ.application.choose_screenshot_path", lambda extension: ""
+    )
+
+    app._consume_native_screenshot()
+
+    assert native_capture.exists()
+    assert "kept at" in app.message
+
+
 def test_mouse_gizmo_translation_is_live_and_coalesces_to_one_undo(monkeypatch):
     fake = FakePolyscope()
     monkeypatch.setitem(sys.modules, "polyscope", fake)

@@ -79,13 +79,21 @@ def choose_exnode_export_path(source: Path) -> str:
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
+    extension = (
+        source.suffix.lower() if source.suffix.lower() == ".exdata" else ".exnode"
+    )
+    file_label = (
+        "OpenCMISS EX data files"
+        if extension == ".exdata"
+        else "OpenCMISS EX node files"
+    )
     try:
         return filedialog.asksaveasfilename(
             title="Export edited node coordinates",
             initialdir=str(source.parent),
-            initialfile=f"{source.stem}_edited.exnode",
-            defaultextension=".exnode",
-            filetypes=[("OpenCMISS EX node files", "*.exnode"), ("All files", "*.*")],
+            initialfile=f"{source.stem}_edited{extension}",
+            defaultextension=extension,
+            filetypes=[(file_label, f"*{extension}"), ("All files", "*.*")],
         )
     finally:
         root.destroy()
@@ -202,9 +210,11 @@ class RegionState:
     node_documents: List[NodeDocument] = field(default_factory=list)
     data_documents: List[NodeDocument] = field(default_factory=list)
     element_documents: List[ElementDocument] = field(default_factory=list)
+    edit_documents: List[NodeDocument] = field(default_factory=list)
     scene: MeshScene | PointScene | None = None
     structures: List[object] = field(default_factory=list)
     field_structure: object | None = None
+    field_structure_name: str = ""
     network: object | None = None
     scalar_values: Dict[str, np.ndarray] = field(default_factory=dict)
     scalar_locations: Dict[str, str] = field(default_factory=dict)
@@ -265,6 +275,8 @@ class LungVizApplication:
         self.ct_volume: CTVolume | None = None
         self.ct_slices: List[CTSliceState] = []
         self.selected_ct_slice_index = 0
+        self._node_pick_shift = False
+        self._node_pick_control = False
         self.message = "Load each mesh or standalone node set as its own region."
 
     @property
@@ -391,6 +403,7 @@ class LungVizApplication:
                 pass
         region.structures.clear()
         region.field_structure = None
+        region.field_structure_name = ""
         region.network = None
         region.edit_handles = None
         region.edit_selection_structure = None
@@ -420,13 +433,19 @@ class LungVizApplication:
 
         self._remove_region_structures(region)
         region.scene = None
+        region.edit_documents = []
         region.scalar_values.clear()
         region.scalar_locations.clear()
         region.scalar_options.clear()
         region.radius_options = ["Constant"]
         region.warnings.clear()
         region.message = ""
-        coordinate_options = coordinate_field_names(region.node_documents)
+        coordinate_documents = (
+            region.node_documents
+            if region.node_documents
+            else region.data_documents[:1]
+        )
+        coordinate_options = coordinate_field_names(coordinate_documents)
         coordinate_name = (
             coordinate_options[min(region.coordinate_index, len(coordinate_options) - 1)]
             if coordinate_options
@@ -439,8 +458,10 @@ class LungVizApplication:
                     region.node_documents, region.element_documents, coordinate_name
                 )
                 region.scene = mesh
+                region.edit_documents = list(region.node_documents)
+                structure_name = f"{region.name} / 1D mesh"
                 network = ps.register_curve_network(
-                    f"{region.name} / 1D mesh",
+                    structure_name,
                     mesh.coordinates,
                     mesh.edges,
                     radius=0.006,
@@ -493,6 +514,7 @@ class LungVizApplication:
                         )
                 region.network = network
                 region.field_structure = network
+                region.field_structure_name = structure_name
                 region.structures.append(network)
                 region.warnings.extend(mesh.warnings)
                 region.message = (
@@ -503,8 +525,12 @@ class LungVizApplication:
                 try:
                     points = build_point_scene(region.node_documents, coordinate_name)
                     region.scene = points
+                    region.edit_documents = list(region.node_documents)
+                    structure_name = (
+                        f"{region.name} / nodes (connectivity unavailable)"
+                    )
                     cloud = ps.register_point_cloud(
-                        f"{region.name} / nodes (connectivity unavailable)",
+                        structure_name,
                         points.coordinates,
                         radius=0.008,
                     )
@@ -513,6 +539,7 @@ class LungVizApplication:
                         {field_name: "nodes" for field_name in region.scalar_values}
                     )
                     region.field_structure = cloud
+                    region.field_structure_name = structure_name
                     region.structures.append(cloud)
                     region.warnings.extend(points.warnings)
                 except ExFileError:
@@ -522,14 +549,17 @@ class LungVizApplication:
             try:
                 points = build_point_scene(region.node_documents, coordinate_name)
                 region.scene = points
+                region.edit_documents = list(region.node_documents)
+                structure_name = f"{region.name} / nodes"
                 cloud = ps.register_point_cloud(
-                    f"{region.name} / nodes", points.coordinates, radius=0.008
+                    structure_name, points.coordinates, radius=0.008
                 )
                 region.scalar_values = self._add_point_fields(cloud, points)
                 region.scalar_locations.update(
                     {field_name: "nodes" for field_name in region.scalar_values}
                 )
                 region.field_structure = cloud
+                region.field_structure_name = structure_name
                 region.structures.append(cloud)
                 region.warnings.extend(points.warnings)
                 region.message = f"{len(points.node_ids)} standalone nodes"
@@ -547,15 +577,33 @@ class LungVizApplication:
 
         for data_index, document in enumerate(region.data_documents, start=1):
             try:
-                points = build_point_scene([document])
+                data_coordinate = (
+                    coordinate_name
+                    if not region.node_documents and data_index == 1
+                    else None
+                )
+                points = build_point_scene([document], data_coordinate)
             except ExFileError as exc:
                 region.warnings.append(f"{document.path.name}: {exc}")
                 continue
             label = document.group_name or document.path.stem or f"data {data_index}"
+            structure_name = f"{region.name} / data / {label}"
             cloud = ps.register_point_cloud(
-                f"{region.name} / data / {label}", points.coordinates, radius=0.008
+                structure_name, points.coordinates, radius=0.008
             )
-            self._add_point_fields(cloud, points, identifier_name="point identifier")
+            point_values = self._add_point_fields(
+                cloud, points, identifier_name="point identifier"
+            )
+            if region.scene is None:
+                region.scene = points
+                region.edit_documents = [document]
+                region.field_structure = cloud
+                region.field_structure_name = structure_name
+                region.scalar_values = point_values
+                region.scalar_locations.update(
+                    {field_name: "nodes" for field_name in point_values}
+                )
+                region.message = f"{len(points.node_ids)} standalone data points"
             region.structures.append(cloud)
             region.warnings.extend(points.warnings)
 
@@ -603,7 +651,7 @@ class LungVizApplication:
             except AttributeError:
                 pass
         self._set_region_gizmo(region, region.transform_gizmo)
-        if region.edit_mode and isinstance(region.scene, MeshScene):
+        if region.edit_mode and isinstance(region.scene, (MeshScene, PointScene)):
             self._create_edit_structures(region)
 
     def _set_region_gizmo(self, region: RegionState, enabled: bool) -> None:
@@ -638,11 +686,11 @@ class LungVizApplication:
         if region.field_structure is None or not region.scalar_options:
             return
         name = region.scalar_options[region.scalar_index]
+        options = {"enabled": True}
+        if region.network is not None:
+            options["defined_on"] = region.scalar_locations.get(name, "nodes")
         region.field_structure.add_scalar_quantity(
-            name,
-            _finite_for_display(region.scalar_values[name]),
-            defined_on=region.scalar_locations.get(name, "nodes"),
-            enabled=True,
+            name, _finite_for_display(region.scalar_values[name]), **options
         )
 
     def _set_radius(self, region: RegionState) -> None:
@@ -697,10 +745,21 @@ class LungVizApplication:
         region.edit_handles = None
         region.edit_handle_name = ""
 
+    @staticmethod
+    def _edit_point_count(region: RegionState) -> int:
+        if isinstance(region.scene, MeshScene):
+            return region.scene.original_node_count
+        if isinstance(region.scene, PointScene):
+            return len(region.scene.node_ids)
+        return 0
+
     def _update_edit_handles(self, region: RegionState) -> None:
-        if not isinstance(region.scene, MeshScene) or region.edit_handles is None:
+        if (
+            not isinstance(region.scene, (MeshScene, PointScene))
+            or region.edit_handles is None
+        ):
             return
-        count = region.scene.original_node_count
+        count = self._edit_point_count(region)
         coordinates = region.scene.coordinates[:count]
         region.edit_handles.update_point_positions(coordinates)
         colors = np.tile(np.asarray([0.72, 0.76, 0.82]), (count, 1))
@@ -714,7 +773,10 @@ class LungVizApplication:
         import polyscope as ps
 
         self._remove_edit_selection_structure(region)
-        if not isinstance(region.scene, MeshScene) or not region.edit_selected:
+        if (
+            not isinstance(region.scene, (MeshScene, PointScene))
+            or not region.edit_selected
+        ):
             return
         selected = np.asarray(region.edit_selected, dtype=int)
         coordinates = region.scene.coordinates[selected]
@@ -751,9 +813,9 @@ class LungVizApplication:
         import polyscope as ps
 
         self._remove_edit_structures(region)
-        if not isinstance(region.scene, MeshScene):
+        if not isinstance(region.scene, (MeshScene, PointScene)):
             return
-        count = region.scene.original_node_count
+        count = self._edit_point_count(region)
         name = f"{region.name} / editable nodes / {region.key}"
         handles = ps.register_point_cloud(
             name,
@@ -769,8 +831,8 @@ class LungVizApplication:
         self._rebuild_edit_selection_structure(region)
 
     def _set_edit_mode(self, region: RegionState, enabled: bool) -> None:
-        if enabled and not isinstance(region.scene, MeshScene):
-            region.message = "Node editing requires a loaded 1D mesh."
+        if enabled and not isinstance(region.scene, (MeshScene, PointScene)):
+            region.message = "Point editing requires loaded EXNODE or EXDATA coordinates."
             return
         region.edit_mode = enabled
         if not enabled:
@@ -779,26 +841,25 @@ class LungVizApplication:
             return
         if region.transform_gizmo:
             self._set_region_gizmo(region, False)
-        assert isinstance(region.scene, MeshScene)
-        node_ids = region.scene.node_ids[: region.scene.original_node_count]
+        assert isinstance(region.scene, (MeshScene, PointScene))
+        count = self._edit_point_count(region)
+        node_ids = region.scene.node_ids[:count]
         if (
             region.edit_original_coordinates is None
             or region.edit_original_node_ids is None
             or not np.array_equal(region.edit_original_node_ids, node_ids)
         ):
-            region.edit_original_coordinates = region.scene.coordinates[
-                : region.scene.original_node_count
-            ].copy()
+            region.edit_original_coordinates = region.scene.coordinates[:count].copy()
             region.edit_original_node_ids = node_ids.copy()
             region.edit_undo.clear()
             region.edit_redo.clear()
         self._create_edit_structures(region)
-        region.message = "Node edit mode enabled; click node handles to select them."
+        region.message = "Point edit mode enabled; click handles to select points."
 
     def _select_edit_nodes(self, region: RegionState, indices: Sequence[int]) -> None:
-        if not isinstance(region.scene, MeshScene):
+        if not isinstance(region.scene, (MeshScene, PointScene)):
             return
-        count = region.scene.original_node_count
+        count = self._edit_point_count(region)
         region.edit_selected = sorted(
             {int(index) for index in indices if 0 <= int(index) < count}
         )
@@ -812,13 +873,13 @@ class LungVizApplication:
     def _write_node_positions(
         self, region: RegionState, indices: np.ndarray, positions: np.ndarray
     ) -> None:
-        assert isinstance(region.scene, MeshScene)
+        assert isinstance(region.scene, (MeshScene, PointScene))
         coordinate_field = region.scene.coordinate_field
         node_ids = region.scene.node_ids[indices]
         positions_by_id = {
             int(node_id): position for node_id, position in zip(node_ids, positions)
         }
-        for document in region.node_documents:
+        for document in region.edit_documents:
             for node in document.nodes:
                 position = positions_by_id.get(node.identifier)
                 values = node.fields.get(coordinate_field)
@@ -828,24 +889,39 @@ class LungVizApplication:
     def _refresh_region_after_edit(
         self, region: RegionState, *, update_selection_structure: bool
     ) -> None:
-        assert isinstance(region.scene, MeshScene)
+        assert isinstance(region.scene, (MeshScene, PointScene))
         previous = region.scene
-        coordinate_options = coordinate_field_names(region.node_documents)
-        coordinate_name = coordinate_options[
-            min(region.coordinate_index, len(coordinate_options) - 1)
-        ]
-        updated = build_mesh_scene(
-            region.node_documents, region.element_documents, coordinate_name
-        )
-        if updated.coordinates.shape != previous.coordinates.shape or not np.array_equal(
-            updated.edges, previous.edges
-        ):
-            raise ExFileError("Editing changed the rendered mesh topology unexpectedly")
+        coordinate_name = previous.coordinate_field
+        if isinstance(previous, MeshScene):
+            updated = build_mesh_scene(
+                region.edit_documents, region.element_documents, coordinate_name
+            )
+            if (
+                updated.coordinates.shape != previous.coordinates.shape
+                or not np.array_equal(updated.edges, previous.edges)
+            ):
+                raise ExFileError(
+                    "Editing changed the rendered mesh topology unexpectedly"
+                )
+        else:
+            updated = build_point_scene(region.edit_documents, coordinate_name)
+            if (
+                updated.coordinates.shape != previous.coordinates.shape
+                or not np.array_equal(updated.node_ids, previous.node_ids)
+            ):
+                raise ExFileError(
+                    "Editing changed the rendered point identifiers unexpectedly"
+                )
         region.scene = updated
-        region.network.update_node_positions(updated.coordinates)
+        if isinstance(updated, MeshScene):
+            assert region.network is not None
+            region.network.update_node_positions(updated.coordinates)
+        else:
+            assert region.field_structure is not None
+            region.field_structure.update_point_positions(updated.coordinates)
         for field_name, values in scalar_variants(updated).items():
             region.scalar_values[field_name] = values
-            region.network.add_scalar_quantity(
+            region.field_structure.add_scalar_quantity(
                 field_name, _finite_for_display(values), enabled=False
             )
         if region.scalar_options:
@@ -870,7 +946,7 @@ class LungVizApplication:
         kind: str = "numeric",
         update_selection_structure: bool = True,
     ) -> None:
-        if not isinstance(region.scene, MeshScene):
+        if not isinstance(region.scene, (MeshScene, PointScene)):
             return
         index_array = np.asarray(indices, dtype=int)
         if not index_array.size:
@@ -903,12 +979,15 @@ class LungVizApplication:
             region.edit_absolute = region.scene.coordinates[
                 region.edit_selected[0]
             ].copy()
-        region.message = f"Moved {len(index_array)} node(s)."
+        region.message = f"Moved {len(index_array)} point(s)."
 
     def _translate_selected_nodes(
         self, region: RegionState, translation: np.ndarray, *, kind: str = "numeric"
     ) -> None:
-        if not isinstance(region.scene, MeshScene) or not region.edit_selected:
+        if (
+            not isinstance(region.scene, (MeshScene, PointScene))
+            or not region.edit_selected
+        ):
             return
         indices = np.asarray(region.edit_selected, dtype=int)
         delta = np.asarray(translation, dtype=float)
@@ -956,13 +1035,13 @@ class LungVizApplication:
     def export_edited_exnode(
         self, region: RegionState, destination: str | Path | None = None
     ) -> Path | None:
-        if not isinstance(region.scene, MeshScene):
+        if not isinstance(region.scene, (MeshScene, PointScene)):
             return None
         coordinate_field = region.scene.coordinate_field
         document = next(
             (
                 item
-                for item in region.node_documents
+                for item in region.edit_documents
                 if coordinate_field in item.fields
                 and any(coordinate_field in node.fields for node in item.nodes)
             ),
@@ -980,14 +1059,57 @@ class LungVizApplication:
 
     def _consume_node_pick(self, ps, psim) -> None:
         region = self.selected_region
-        if region is None or not region.edit_mode or not isinstance(region.scene, MeshScene):
+        if (
+            region is None
+            or not region.edit_mode
+            or not isinstance(region.scene, (MeshScene, PointScene))
+        ):
             return
+        io = None
+        mouse_clicked = False
         try:
-            if not ps.have_selection():
+            io = psim.GetIO()
+            current_shift = bool(io.KeyShift)
+            current_control = bool(io.KeyCtrl)
+            try:
+                mouse_clicked = psim.IsMouseClicked(psim.ImGuiMouseButton_Left)
+            except AttributeError:
+                try:
+                    mouse_clicked = bool(io.MouseClicked[0])
+                except AttributeError:
+                    mouse_clicked = False
+            if mouse_clicked:
+                self._node_pick_shift = current_shift
+                self._node_pick_control = current_control
+        except AttributeError:
+            current_shift = psim.IsKeyDown(psim.ImGuiKey_LeftShift) or psim.IsKeyDown(
+                psim.ImGuiKey_RightShift
+            )
+            current_control = psim.IsKeyDown(
+                psim.ImGuiKey_LeftCtrl
+            ) or psim.IsKeyDown(psim.ImGuiKey_RightCtrl)
+            self._node_pick_shift = current_shift
+            self._node_pick_control = current_control
+
+        picked = None
+        if (
+            mouse_clicked
+            and io is not None
+            and not bool(getattr(io, "WantCaptureMouse", False))
+        ):
+            try:
+                direct_pick = ps.pick(screen_coords=io.MousePos)
+                if direct_pick.is_hit:
+                    picked = direct_pick
+            except (AttributeError, RuntimeError):
+                pass
+        if picked is None:
+            try:
+                if not ps.have_selection():
+                    return
+                picked = ps.get_selection()
+            except (AttributeError, RuntimeError):
                 return
-            picked = ps.get_selection()
-        except (AttributeError, RuntimeError):
-            return
 
         index = None
         if picked.structure_name == region.edit_handle_name:
@@ -996,26 +1118,17 @@ class LungVizApplication:
             local_index = int(picked.structure_data.get("index", picked.local_index))
             if 0 <= local_index < len(region.edit_selected):
                 index = region.edit_selected[local_index]
-        elif (
-            picked.structure_name == f"{region.name} / 1D mesh"
-            and str(picked.structure_data.get("element_type", "")).lower() == "node"
-        ):
-            index = picked.structure_data.get("index", picked.local_index)
-        if index is None or not 0 <= int(index) < region.scene.original_node_count:
+        elif picked.structure_name == region.field_structure_name:
+            element_type = str(
+                picked.structure_data.get("element_type", "node")
+            ).lower()
+            if isinstance(region.scene, PointScene) or element_type == "node":
+                index = picked.structure_data.get("index", picked.local_index)
+        if index is None or not 0 <= int(index) < self._edit_point_count(region):
             return
 
-        try:
-            io = psim.GetIO()
-            shift = bool(io.KeyShift)
-            control = bool(io.KeyCtrl)
-        except AttributeError:
-            # Compatibility with older Polyscope/ImGui bindings.
-            shift = psim.IsKeyDown(psim.ImGuiKey_LeftShift) or psim.IsKeyDown(
-                psim.ImGuiKey_RightShift
-            )
-            control = psim.IsKeyDown(psim.ImGuiKey_LeftCtrl) or psim.IsKeyDown(
-                psim.ImGuiKey_RightCtrl
-            )
+        shift = current_shift or self._node_pick_shift
+        control = current_control or self._node_pick_control
         selected = set(region.edit_selected)
         index = int(index)
         if control:
@@ -1029,6 +1142,8 @@ class LungVizApplication:
             selected = {index}
         self._select_edit_nodes(region, sorted(selected))
         ps.reset_selection()
+        self._node_pick_shift = False
+        self._node_pick_control = False
 
     def _sync_node_edit_gizmo(self, psim) -> None:
         region = self.selected_region
@@ -1183,21 +1298,21 @@ class LungVizApplication:
         self.message = "Scene cleared."
 
     def _draw_node_edit_panel(self, psim, region: RegionState) -> None:
-        if not isinstance(region.scene, MeshScene):
+        if not isinstance(region.scene, (MeshScene, PointScene)):
             return
-        changed, enabled = psim.Checkbox("Edit mesh nodes", region.edit_mode)
+        changed, enabled = psim.Checkbox("Edit nodes / data points", region.edit_mode)
         if changed:
             self._set_edit_mode(region, enabled)
         if not region.edit_mode:
             return
 
         psim.TextWrapped(
-            "Click a node handle to select it. Shift-click adds nodes and Ctrl-click "
-            "toggles them. Drag the selected nodes with the translation arrows."
+            "Click a point handle to select it. Shift-click adds points and Ctrl-click "
+            "toggles them. Drag the selection with the translation arrows."
         )
-        if psim.Button("Select all nodes"):
+        if psim.Button("Select all points"):
             self._select_edit_nodes(
-                region, range(region.scene.original_node_count)
+                region, range(self._edit_point_count(region))
             )
         psim.SameLine()
         if psim.Button("Clear selection"):
@@ -1206,7 +1321,7 @@ class LungVizApplication:
         selected_ids = region.scene.node_ids[
             np.asarray(region.edit_selected, dtype=int)
         ] if region.edit_selected else np.asarray([], dtype=int)
-        psim.TextUnformatted(f"Selected nodes: {len(selected_ids)}")
+        psim.TextUnformatted(f"Selected points: {len(selected_ids)}")
         if selected_ids.size:
             preview = ", ".join(str(value) for value in selected_ids[:8])
             if len(selected_ids) > 8:
@@ -1239,17 +1354,17 @@ class LungVizApplication:
                 except (ExFileError, ValueError) as exc:
                     region.message = f"Could not move node: {exc}"
 
-        if psim.Button("Undo node edit"):
+        if psim.Button("Undo point edit"):
             self._undo_node_edit(region)
         psim.SameLine()
-        if psim.Button("Redo node edit"):
+        if psim.Button("Redo point edit"):
             self._redo_node_edit(region)
-        if psim.Button("Reset selected nodes"):
+        if psim.Button("Reset selected points"):
             self._reset_selected_nodes(region)
         psim.SameLine()
-        if psim.Button("Reset all nodes"):
+        if psim.Button("Reset all points"):
             self._reset_all_nodes(region)
-        if psim.Button("Export edited EXNODE..."):
+        if psim.Button("Export edited EX file..."):
             try:
                 self.export_edited_exnode(region)
             except (ExFileError, OSError) as exc:
@@ -1310,7 +1425,7 @@ class LungVizApplication:
             self._set_region_gizmo(region, enabled)
         self._draw_node_edit_panel(psim, region)
 
-        coordinate_options = coordinate_field_names(region.node_documents)
+        coordinate_options = coordinate_field_names(region.edit_documents)
         if coordinate_options:
             changed, value = psim.Combo(
                 "Coordinates", region.coordinate_index, coordinate_options

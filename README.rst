@@ -77,15 +77,16 @@ uniform thickness. Colour only changes the selected colour map; tube radius is
 an independent geometric control. Flow is mapped linearly over its data range,
 which can be adjusted in Polyscope's Scene panel.
 
-Enable **Edit mesh nodes** to display pickable node handles. Click to replace
-the selection, Shift-click to add a node, or Ctrl-click to toggle one. The
-orange selection has a Polyscope translation gizmo for mouse movement. Enter a
-``Translation delta`` to add the same x, y, z displacement to every selected
-node; a single selected node also exposes its absolute position. Connected
-segments update without changing their connectivity, and cubic Hermite display
-samples are regenerated. Use undo, redo, or reset before choosing **Export
-edited EXNODE...**. Export preserves the loaded node file's headers, identifiers,
-derivatives, and non-coordinate fields and never overwrites the loaded file.
+Enable **Edit nodes / data points** to display pickable handles for a 1D mesh,
+standalone EXNODE region, or EXDATA-only region. Click to replace the selection,
+Shift-click to add a point, or Ctrl-click to toggle one. The orange selection
+has a Polyscope translation gizmo for mouse movement. Enter a ``Translation
+delta`` to add the same x, y, z displacement to every selected point; a single
+selected point also exposes its absolute position. Connected mesh segments
+update without changing their connectivity, and cubic Hermite display samples
+are regenerated. Use undo, redo, or reset before choosing **Export edited EX
+file...**. Export preserves the loaded file's headers, identifiers, derivatives,
+and non-coordinate fields and never overwrites the loaded file.
 
 For CT data, choose **Load DICOM folder...** or **Load NIfTI...**. DICOM pixel
 values are converted with their rescale slope/intercept, normally yielding

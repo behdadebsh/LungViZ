@@ -120,6 +120,7 @@ class FakePolyscope:
         self.structures = {}
         self.gizmos = {}
         self.selection = None
+        self.pick_result = SimpleNamespace(is_hit=False)
 
     def remove_all_structures(self):
         self.structures.clear()
@@ -156,6 +157,10 @@ class FakePolyscope:
 
     def reset_selection(self):
         self.selection = None
+
+    def pick(self, *, screen_coords):
+        self.last_pick_coords = screen_coords
+        return self.pick_result
 
 
 def test_application_loads_mesh_data_and_visual_quantities(monkeypatch):
@@ -260,6 +265,45 @@ def test_node_edit_translation_updates_connected_mesh_and_supports_history(
     )
 
 
+def test_standalone_exnode_and_exdata_regions_can_edit_points(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    mesh_region = app.load_region(
+        [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
+    )
+    point_region = app.load_region([EXAMPLES / "sample.exnode"])
+
+    assert isinstance(point_region.scene, PointScene)
+    mesh_original = mesh_region.scene.coordinates.copy()
+    point_original = point_region.scene.coordinates[[0, 2]].copy()
+    app._set_edit_mode(point_region, True)
+    app._select_edit_nodes(point_region, [0, 2])
+    app._translate_selected_nodes(point_region, np.asarray([0.1, 0.2, 0.3]))
+
+    np.testing.assert_allclose(
+        point_region.scene.coordinates[[0, 2]], point_original + [0.1, 0.2, 0.3]
+    )
+    np.testing.assert_allclose(
+        point_region.field_structure.points, point_region.scene.coordinates
+    )
+    np.testing.assert_allclose(mesh_region.scene.coordinates, mesh_original)
+
+    data_region = app.load_region([EXAMPLES / "sample.exdata"])
+    assert isinstance(data_region.scene, PointScene)
+    assert data_region.edit_documents == data_region.data_documents
+    data_original = data_region.scene.coordinates[1].copy()
+    app._set_edit_mode(data_region, True)
+    app._select_edit_nodes(data_region, [1])
+    app._translate_selected_nodes(data_region, np.asarray([-0.5, 0.0, 0.0]))
+    np.testing.assert_allclose(
+        data_region.scene.coordinates[1], data_original + [-0.5, 0.0, 0.0]
+    )
+    np.testing.assert_allclose(
+        data_region.field_structure.points, data_region.scene.coordinates
+    )
+
+
 def test_mouse_gizmo_translation_is_live_and_coalesces_to_one_undo(monkeypatch):
     fake = FakePolyscope()
     monkeypatch.setitem(sys.modules, "polyscope", fake)
@@ -311,8 +355,11 @@ def test_mouse_pick_replaces_and_shift_adds_node_selection(monkeypatch):
     )
     app._set_edit_mode(region, True)
     io = SimpleNamespace(KeyShift=False, KeyCtrl=False)
+    mouse = SimpleNamespace(clicked=True)
     psim = SimpleNamespace(
         GetIO=lambda: io,
+        ImGuiMouseButton_Left=0,
+        IsMouseClicked=lambda _button: mouse.clicked,
         ImGuiKey_LeftShift=1,
         ImGuiKey_RightShift=2,
         ImGuiKey_LeftCtrl=3,
@@ -328,7 +375,13 @@ def test_mouse_pick_replaces_and_shift_adds_node_selection(monkeypatch):
     app._consume_node_pick(fake, psim)
     assert region.edit_selected == [1]
 
+    fake.selection = None
     io.KeyShift = True
+    mouse.clicked = True
+    app._consume_node_pick(fake, psim)
+
+    io.KeyShift = False
+    mouse.clicked = False
     fake.selection = SimpleNamespace(
         structure_name=region.edit_handle_name,
         structure_data={"index": 3},
@@ -337,8 +390,8 @@ def test_mouse_pick_replaces_and_shift_adds_node_selection(monkeypatch):
     app._consume_node_pick(fake, psim)
     assert region.edit_selected == [1, 3]
 
-    io.KeyShift = False
     io.KeyCtrl = True
+    mouse.clicked = True
     fake.selection = SimpleNamespace(
         structure_name=region.edit_handle_name,
         structure_data={"index": 1},
@@ -346,6 +399,39 @@ def test_mouse_pick_replaces_and_shift_adds_node_selection(monkeypatch):
     )
     app._consume_node_pick(fake, psim)
     assert region.edit_selected == [3]
+
+
+def test_shift_click_uses_direct_viewport_pick(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region(
+        [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
+    )
+    app._set_edit_mode(region, True)
+    app._select_edit_nodes(region, [0])
+    io = SimpleNamespace(
+        KeyShift=True,
+        KeyCtrl=False,
+        MousePos=(320.0, 240.0),
+        WantCaptureMouse=False,
+    )
+    psim = SimpleNamespace(
+        GetIO=lambda: io,
+        ImGuiMouseButton_Left=0,
+        IsMouseClicked=lambda _button: True,
+    )
+    fake.pick_result = SimpleNamespace(
+        is_hit=True,
+        structure_name=region.edit_handle_name,
+        structure_data={"index": 2},
+        local_index=2,
+    )
+
+    app._consume_node_pick(fake, psim)
+
+    assert region.edit_selected == [0, 2]
+    assert fake.last_pick_coords == (320.0, 240.0)
 
 
 def test_element_flow_colours_edges_and_radius_controls_edge_thickness(

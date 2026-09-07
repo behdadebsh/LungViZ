@@ -27,6 +27,9 @@
 *.out
 *.app
 
+# Temp_files
+*.ini
+
 # OS X
 .DS_Store
 
@@ -42,6 +45,11 @@ CMakeLists.txt.user
 # Compiled Python files
 *.pyc
 __pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
 
 # PyCharm
 .idea/

@@ -170,6 +170,9 @@ class FakePolyscope:
     def show(self):
         self.shown = True
 
+    def screenshot(self, filename, *, transparent_bg, include_UI):
+        self.saved_screenshot = (filename, transparent_bg, include_UI)
+
     def add_transformation_gizmo(self, name):
         gizmo = FakeTransformationGizmo(name)
         self.gizmos[name] = gizmo
@@ -219,6 +222,10 @@ def test_application_loads_mesh_data_and_visual_quantities(monkeypatch):
     region.radius_index = region.radius_options.index("radius")
     app._set_radius(region)
     assert region.network.radius_quantity == ("radius: radius", False)
+    np.testing.assert_allclose(
+        region.network.scalars["radius: radius"][0],
+        region.scalar_values["radius"] * 0.25,
+    )
 
 
 def test_regions_keep_repeated_node_identifiers_isolated(monkeypatch, tmp_path):
@@ -395,6 +402,31 @@ def test_run_uses_free_camera_and_installs_file_drop_loader(monkeypatch):
     assert fake.files_dropped_callback == app._files_dropped
 
 
+def test_named_screenshot_uses_selected_path_and_background(monkeypatch, tmp_path):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    destination = tmp_path / "airway-flow.png"
+
+    result = app.save_screenshot(destination)
+
+    assert result == destination.resolve()
+    assert fake.saved_screenshot == (str(destination.resolve()), False, False)
+    assert str(destination.resolve()) in app.message
+
+    app.screenshot_transparent_background = True
+    transparent_destination = tmp_path / "airway-transparent.png"
+    app.save_screenshot(transparent_destination)
+    assert fake.saved_screenshot == (
+        str(transparent_destination.resolve()),
+        True,
+        False,
+    )
+    jpg_destination = tmp_path / "airway-flow.jpg"
+    app.save_screenshot(jpg_destination)
+    assert fake.saved_screenshot == (str(jpg_destination.resolve()), False, False)
+
+
 def test_mouse_gizmo_translation_is_live_and_coalesces_to_one_undo(monkeypatch):
     fake = FakePolyscope()
     monkeypatch.setitem(sys.modules, "polyscope", fake)
@@ -569,6 +601,17 @@ Element: 3 0 0
     assert region.network.edge_radius_quantity == (
         "radius: radius_perf [elements]",
         False,
+    )
+    np.testing.assert_allclose(
+        region.network.scalars["radius: radius_perf [elements]"][0],
+        region.scalar_values["radius_perf [elements]"] * 0.25,
+    )
+
+    region.radius_scale = 0.1
+    app._set_radius(region)
+    np.testing.assert_allclose(
+        region.network.scalars["radius: radius_perf [elements]"][0],
+        region.scalar_values["radius_perf [elements]"] * 0.1,
     )
 
     assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"

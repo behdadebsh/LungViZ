@@ -16,7 +16,7 @@ Features
 * Inspect original node and element identifiers and 1D connectivity.
 * Read grid-based ``Values:`` blocks as fields associated with mesh elements.
 * Colour a network by any nodal or element scalar field, vector component, or magnitude.
-* Render element radius fields as variable-radius tubes in physical mesh units.
+* Render radius fields as variable-radius tubes with an adjustable display scale.
 * Select one or many mesh nodes and move them with the mouse or an exact translation vector.
 * Undo, redo, reset, and export edited coordinates to a new ``.exnode`` file.
 * Display multi-component fields as Polyscope vectors.
@@ -30,6 +30,7 @@ Features
 * Interactively transform a mesh region to align it with the CT when coordinate frames differ.
 * Continue using Polyscope's native picking, camera, screenshot, colour-map, and structure controls.
 * Start with free-orientation camera navigation by default.
+* Save a named PNG or JPEG screenshot to a chosen folder.
 
 Installation
 ------------
@@ -88,6 +89,16 @@ radius when both associations are available. Select ``Constant`` to return to
 uniform thickness. Colour only changes the selected colour map; tube radius is
 an independent geometric control. Flow is mapped linearly over its data range,
 which can be adjusted in Polyscope's Scene panel.
+
+The **Radius scale** control multiplies the selected radius field for display
+without changing the imported data. It uses a logarithmic range from 0.001 to
+10 and starts at 0.25 to reduce overlapping rounded capsules at large proximal
+branches. Choose **Use physical radius (1 x)** whenever the radius and coordinate
+files use compatible units and true physical scale is desired.
+
+Use **Save screenshot as...** to choose an explicit PNG or JPEG filename and
+folder. The adjacent option controls whether PNG screenshots have a transparent
+background. The rendered image excludes the interface panels.
 
 Enable **Edit nodes / data points** to display pickable handles for a 1D mesh,
 standalone EXNODE region, or EXDATA-only region. Click to replace the selection,

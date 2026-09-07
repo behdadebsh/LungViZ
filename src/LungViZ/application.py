@@ -102,6 +102,30 @@ def choose_exnode_export_path(source: Path) -> str:
         root.destroy()
 
 
+def choose_screenshot_path() -> str:
+    """Choose a named PNG or JPEG destination for the current view."""
+
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        return filedialog.asksaveasfilename(
+            title="Save LungViZ screenshot",
+            initialdir=str(Path.cwd()),
+            initialfile="lungviz_view.png",
+            defaultextension=".png",
+            filetypes=[
+                ("PNG image", "*.png"),
+                ("JPEG image", "*.jpg"),
+            ],
+        )
+    finally:
+        root.destroy()
+
+
 def _finite_for_display(values: np.ndarray) -> np.ndarray:
     finite = values[np.isfinite(values)]
     replacement = float(np.median(finite)) if finite.size else 0.0
@@ -227,6 +251,7 @@ class RegionState:
     coordinate_index: int = 0
     scalar_index: int = 0
     radius_index: int = 0
+    radius_scale: float = 0.25
     transform_gizmo: bool = False
     surface_opacity: float = 0.65
     transform: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=float))
@@ -282,6 +307,7 @@ class LungVizApplication:
         self.selected_ct_slice_index = 0
         self._node_pick_shift = False
         self._node_pick_control = False
+        self.screenshot_transparent_background = False
         self.message = "Load each mesh or standalone node set as its own region."
 
     @property
@@ -769,7 +795,10 @@ class LungVizApplication:
         if region.radius_index == 0:
             return
         name = region.radius_options[region.radius_index]
-        values = np.clip(_finite_for_display(region.scalar_values[name]), 0.0, None)
+        values = (
+            np.clip(_finite_for_display(region.scalar_values[name]), 0.0, None)
+            * region.radius_scale
+        )
         quantity_name = f"radius: {name}"
         location = region.scalar_locations.get(name, "nodes")
         region.network.add_scalar_quantity(
@@ -785,6 +814,32 @@ class LungVizApplication:
             return
         region.surface_opacity = float(np.clip(opacity, 0.0, 1.0))
         region.field_structure.set_transparency(region.surface_opacity)
+
+    def save_screenshot(self, destination: str | Path | None = None) -> Path | None:
+        """Save the current rendered view to a user-selected image path."""
+
+        import polyscope as ps
+
+        if destination is None:
+            destination = choose_screenshot_path()
+        if not destination:
+            return None
+        target = Path(destination).expanduser().resolve()
+        if not target.suffix:
+            target = target.with_suffix(".png")
+        if target.suffix.lower() not in {".png", ".jpg"}:
+            raise ValueError("Screenshots must use a .png or .jpg extension")
+        transparent_background = (
+            self.screenshot_transparent_background
+            and target.suffix.lower() == ".png"
+        )
+        ps.screenshot(
+            str(target),
+            transparent_bg=transparent_background,
+            include_UI=False,
+        )
+        self.message = f"Saved screenshot to {target}."
+        return target
 
     def _remove_edit_selection_structure(self, region: RegionState) -> None:
         gizmo = region.edit_gizmo
@@ -1542,12 +1597,36 @@ class LungVizApplication:
                 if changed:
                     region.radius_index = value
                     self._set_radius(region)
+                changed, radius_scale = psim.SliderFloat(
+                    "Radius scale",
+                    region.radius_scale,
+                    0.001,
+                    10.0,
+                    "%.3g x",
+                    psim.ImGuiSliderFlags_Logarithmic,
+                )
+                if changed:
+                    region.radius_scale = float(radius_scale)
+                    self._set_radius(region)
+                if psim.Button("Use physical radius (1 x)"):
+                    region.radius_scale = 1.0
+                    self._set_radius(region)
+                if region.radius_index > 0:
+                    radius_name = region.radius_options[region.radius_index]
+                    raw_radius = region.scalar_values[radius_name]
+                    finite_radius = raw_radius[np.isfinite(raw_radius)]
+                    if finite_radius.size:
+                        psim.TextUnformatted(
+                            "Displayed radius range: "
+                            f"{finite_radius.min() * region.radius_scale:.6g} to "
+                            f"{finite_radius.max() * region.radius_scale:.6g}"
+                        )
                 psim.TextWrapped(
                     "Colour maps values without changing geometry. Tube radius changes "
                     "thickness independently. Fields marked [elements] belong to vessel "
                     "segments; unmarked fields belong to nodes. Flow uses a linear colour "
-                    "range, adjustable in Polyscope's Scene panel. Radius remains in the "
-                    "same physical units as the mesh coordinates."
+                    "range, adjustable in Polyscope's Scene panel. Radius scale multiplies "
+                    "the imported values; 1 x uses their physical coordinate units."
                 )
 
         if region.warnings and psim.TreeNode("Import warnings"):
@@ -1653,6 +1732,18 @@ class LungVizApplication:
         self._draw_region_panel(psim)
         psim.SeparatorText("CT volume")
         self._draw_ct_panel(psim)
+        psim.SeparatorText("Screenshot")
+        changed, transparent = psim.Checkbox(
+            "Transparent background", self.screenshot_transparent_background
+        )
+        if changed:
+            self.screenshot_transparent_background = transparent
+        if psim.Button("Save screenshot as..."):
+            try:
+                self.save_screenshot()
+            except (OSError, RuntimeError, ValueError) as exc:
+                self.message = f"Could not save screenshot: {exc}"
+        psim.TextWrapped("Saves the rendered view without the interface panels.")
         psim.Separator()
         if psim.Button("Clear everything"):
             self.clear()

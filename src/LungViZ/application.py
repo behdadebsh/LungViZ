@@ -160,6 +160,68 @@ def _edge_radii_to_node_radii(
     return node_radii
 
 
+def _edge_radii_to_mean_node_radii(
+    edge_radii: np.ndarray, edges: np.ndarray, node_count: int
+) -> np.ndarray:
+    """Match Polyscope's inferred node radius for an edge-radius quantity."""
+
+    radii = np.asarray(edge_radii, dtype=float).reshape(-1)
+    connectivity = np.asarray(edges, dtype=int)
+    if radii.size != len(connectivity):
+        raise ValueError("Each rendered edge must have one radius")
+    radius_sum = np.zeros(node_count, dtype=float)
+    incident_count = np.zeros(node_count, dtype=int)
+    clipped = np.clip(radii, 0.0, None)
+    np.add.at(radius_sum, connectivity[:, 0], clipped)
+    np.add.at(radius_sum, connectivity[:, 1], clipped)
+    np.add.at(incident_count, connectivity[:, 0], 1)
+    np.add.at(incident_count, connectivity[:, 1], 1)
+    node_radii = np.zeros(node_count, dtype=float)
+    connected = incident_count > 0
+    node_radii[connected] = radius_sum[connected] / incident_count[connected]
+    return node_radii
+
+
+def _endpoint_cap_positions(
+    coordinates: np.ndarray, edges: np.ndarray, node_radii: np.ndarray
+) -> np.ndarray:
+    """Inset degree-one display nodes so their rounded caps end at the true tips."""
+
+    points = np.asarray(coordinates, dtype=float)
+    connectivity = np.asarray(edges, dtype=int)
+    radii = np.asarray(node_radii, dtype=float).reshape(-1)
+    if radii.size != len(points):
+        raise ValueError("Each rendered node must have one radius")
+    result = points.copy()
+    if not len(connectivity):
+        return result
+
+    degrees = np.zeros(len(points), dtype=int)
+    np.add.at(degrees, connectivity[:, 0], 1)
+    np.add.at(degrees, connectivity[:, 1], 1)
+    neighbours = np.full(len(points), -1, dtype=int)
+    neighbours[connectivity[:, 0]] = connectivity[:, 1]
+    neighbours[connectivity[:, 1]] = connectivity[:, 0]
+    endpoints = np.flatnonzero(degrees == 1)
+    if not endpoints.size:
+        return result
+
+    directions = points[neighbours[endpoints]] - points[endpoints]
+    lengths = np.linalg.norm(directions, axis=1)
+    valid = lengths > np.finfo(float).eps
+    if not np.any(valid):
+        return result
+    endpoints = endpoints[valid]
+    directions = directions[valid]
+    lengths = lengths[valid]
+    shifts = np.minimum(
+        np.clip(radii[endpoints], 0.0, None),
+        0.45 * lengths,
+    )
+    result[endpoints] += directions * (shifts / lengths)[:, None]
+    return result
+
+
 def _log10_colour_values(values: np.ndarray) -> tuple[np.ndarray, float, int]:
     """Return log10 display values, clamping non-positive entries to the floor."""
 
@@ -878,6 +940,8 @@ class LungVizApplication:
             return
         region.network.clear_node_radius_quantity()
         region.network.clear_edge_radius_quantity()
+        if isinstance(region.scene, MeshScene):
+            region.network.update_node_positions(region.scene.coordinates)
         if region.radius_index == 0:
             return
         name = region.radius_options[region.radius_index]
@@ -887,20 +951,37 @@ class LungVizApplication:
         )
         quantity_name = f"radius: {name}"
         location = region.scalar_locations.get(name, "nodes")
-        if (
-            location == "edges"
-            and region.smooth_radius_joins
-            and isinstance(region.scene, MeshScene)
-        ):
-            quantity_name = f"smoothed radius: {name}"
-            node_values = _edge_radii_to_node_radii(
-                values, region.scene.edges, len(region.scene.coordinates)
+        if location == "edges" and isinstance(region.scene, MeshScene):
+            if region.smooth_radius_joins:
+                quantity_name = f"smoothed radius: {name}"
+                node_values = _edge_radii_to_node_radii(
+                    values, region.scene.edges, len(region.scene.coordinates)
+                )
+                region.network.update_node_positions(
+                    _endpoint_cap_positions(
+                        region.scene.coordinates, region.scene.edges, node_values
+                    )
+                )
+                region.network.add_scalar_quantity(
+                    quantity_name, node_values, defined_on="nodes", enabled=False
+                )
+                region.network.set_node_radius_quantity(quantity_name, autoscale=False)
+                return
+            else:
+                node_values = _edge_radii_to_mean_node_radii(
+                    values, region.scene.edges, len(region.scene.coordinates)
+                )
+                region.network.update_node_positions(
+                    _endpoint_cap_positions(
+                        region.scene.coordinates, region.scene.edges, node_values
+                    )
+                )
+        elif location == "nodes" and isinstance(region.scene, MeshScene):
+            region.network.update_node_positions(
+                _endpoint_cap_positions(
+                    region.scene.coordinates, region.scene.edges, values
+                )
             )
-            region.network.add_scalar_quantity(
-                quantity_name, node_values, defined_on="nodes", enabled=False
-            )
-            region.network.set_node_radius_quantity(quantity_name, autoscale=False)
-            return
         region.network.add_scalar_quantity(
             quantity_name, values, defined_on=location, enabled=False
         )
@@ -1865,8 +1946,10 @@ class LungVizApplication:
                             region.smooth_radius_joins = smooth_joins
                             self._set_radius(region)
                         psim.TextWrapped(
-                            "Display only: uses shared node radii and tapered segments. "
-                            "The loaded geometry, connectivity, and radius field are unchanged."
+                            "Display only: uses shared node radii to cover tube joins. "
+                            "Rounded inlet and terminal caps end at the original node "
+                            "coordinates without protruding as node blobs. The loaded "
+                            "geometry, connectivity, and radius field are unchanged."
                         )
                     raw_radius = region.scalar_values[radius_name]
                     finite_radius = raw_radius[np.isfinite(raw_radius)]

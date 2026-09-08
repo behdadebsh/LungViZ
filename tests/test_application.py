@@ -7,6 +7,7 @@ import numpy as np
 from LungViZ.application import (
     LungVizApplication,
     _anatomical_plane_axes,
+    _endpoint_cap_positions,
     _log10_colour_values,
     _sample_volume,
     _slice_geometry,
@@ -282,7 +283,14 @@ def test_node_edit_translation_updates_connected_mesh_and_supports_history(
     np.testing.assert_allclose(region.scene.coordinates[3], original[3] + [2, -1, 0.5])
     np.testing.assert_allclose(region.scene.coordinates[0], original[0])
     np.testing.assert_array_equal(region.scene.edges, original_edges)
-    np.testing.assert_allclose(region.network.node_positions, region.scene.coordinates)
+    radius_quantity = region.network.radius_quantity[0]
+    display_radii = region.network.scalars[radius_quantity][0]
+    np.testing.assert_allclose(
+        region.network.node_positions,
+        _endpoint_cap_positions(
+            region.scene.coordinates, region.scene.edges, display_radii
+        ),
+    )
     assert len(region.edit_undo) == 1
 
     app._undo_node_edit(region)
@@ -451,6 +459,27 @@ def test_log_colour_values_clamp_non_positive_entries_to_positive_floor():
     assert floor == 0.1
     assert clamped == 2
     np.testing.assert_allclose(logged, [2.0, -1.0, -1.0, -1.0, -1.0])
+
+
+def test_endpoint_caps_end_at_true_tree_tips_without_changing_mesh():
+    coordinates = np.asarray(
+        [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 1.0, 0.0]]
+    )
+    edges = np.asarray([[0, 1], [1, 2]])
+    radii = np.asarray([0.25, 0.30, 0.10])
+    original = coordinates.copy()
+
+    displayed = _endpoint_cap_positions(coordinates, edges, radii)
+
+    np.testing.assert_allclose(
+        displayed,
+        [[0.25, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 0.9, 0.0]],
+    )
+    np.testing.assert_allclose(
+        np.linalg.norm(displayed[[0, 2]] - coordinates[[0, 2]], axis=1),
+        radii[[0, 2]],
+    )
+    np.testing.assert_array_equal(coordinates, original)
 
 
 def test_native_screenshot_button_opens_save_as_and_moves_capture(
@@ -690,12 +719,30 @@ Element: 3 0 0
         region.network.scalars["smoothed radius: radius_perf [elements]"][0],
         expected_node_radii * 0.25,
     )
+    original_coordinates = region.scene.coordinates.copy()
+    np.testing.assert_allclose(
+        region.network.node_positions,
+        _endpoint_cap_positions(
+            original_coordinates,
+            region.scene.edges,
+            expected_node_radii * 0.25,
+        ),
+    )
+    np.testing.assert_array_equal(region.scene.coordinates, original_coordinates)
 
     region.radius_scale = 0.1
     app._set_radius(region)
     np.testing.assert_allclose(
         region.network.scalars["smoothed radius: radius_perf [elements]"][0],
         expected_node_radii * 0.1,
+    )
+    np.testing.assert_allclose(
+        region.network.node_positions,
+        _endpoint_cap_positions(
+            original_coordinates,
+            region.scene.edges,
+            expected_node_radii * 0.1,
+        ),
     )
 
     region.smooth_radius_joins = False
@@ -709,6 +756,19 @@ Element: 3 0 0
         region.network.scalars["radius: radius_perf [elements]"][0],
         region.scalar_values["radius_perf [elements]"] * 0.1,
     )
+    mean_node_radii = np.asarray([0.30, (0.30 + 0.20 + 0.10) / 3, 0.20, 0.10])
+    np.testing.assert_allclose(
+        region.network.node_positions,
+        _endpoint_cap_positions(
+            original_coordinates,
+            region.scene.edges,
+            mean_node_radii * 0.1,
+        ),
+    )
+
+    region.radius_index = 0
+    app._set_radius(region)
+    np.testing.assert_array_equal(region.network.node_positions, original_coordinates)
 
     assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"
 

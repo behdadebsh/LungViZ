@@ -160,6 +160,19 @@ def _edge_radii_to_node_radii(
     return node_radii
 
 
+def _log10_colour_values(values: np.ndarray) -> tuple[np.ndarray, float, int]:
+    """Return log10 display values, clamping non-positive entries to the floor."""
+
+    raw = np.asarray(values, dtype=float)
+    positive = raw[np.isfinite(raw) & (raw > 0.0)]
+    if not positive.size:
+        raise ValueError("A logarithmic colour scale requires at least one positive value")
+    floor = float(positive.min())
+    non_positive_count = int(np.count_nonzero(np.isfinite(raw) & (raw <= 0.0)))
+    safe = np.where(np.isfinite(raw) & (raw > 0.0), raw, floor)
+    return np.log10(safe), floor, non_positive_count
+
+
 def _display_indices(size: int, maximum: int = 384) -> np.ndarray:
     if size <= maximum:
         return np.arange(size, dtype=int)
@@ -278,6 +291,7 @@ class RegionState:
     radius_options: List[str] = field(default_factory=lambda: ["Constant"])
     coordinate_index: int = 0
     scalar_index: int = 0
+    log_flow_colours: bool = False
     radius_index: int = 0
     radius_scale: float = 0.25
     smooth_radius_joins: bool = True
@@ -810,11 +824,19 @@ class LungVizApplication:
         if region.field_structure is None or not region.scalar_options:
             return
         name = region.scalar_options[region.scalar_index]
+        display_name = name
+        display_values = region.scalar_values[name]
+        if region.log_flow_colours and "flow" in name.lower():
+            try:
+                display_values, _floor, _clamped = _log10_colour_values(display_values)
+                display_name = f"log10({name})"
+            except ValueError as exc:
+                region.message = str(exc)
         options = {"enabled": True}
         if region.network is not None:
             options["defined_on"] = region.scalar_locations.get(name, "nodes")
         region.field_structure.add_scalar_quantity(
-            name, _finite_for_display(region.scalar_values[name]), **options
+            display_name, _finite_for_display(display_values), **options
         )
 
     def _set_radius(self, region: RegionState) -> None:
@@ -1702,10 +1724,38 @@ class LungVizApplication:
                 self._set_scalar(region)
             if psim.Button("Apply colour field"):
                 self._set_scalar(region)
-            selected = region.scalar_values[region.scalar_options[region.scalar_index]]
+            selected_name = region.scalar_options[region.scalar_index]
+            selected = region.scalar_values[selected_name]
             finite = selected[np.isfinite(selected)]
             if finite.size:
                 psim.TextUnformatted(f"Range: {finite.min():.6g} to {finite.max():.6g}")
+            if "flow" in selected_name.lower():
+                changed, logarithmic = psim.Checkbox(
+                    "Logarithmic flow colours", region.log_flow_colours
+                )
+                if changed:
+                    region.log_flow_colours = logarithmic
+                    self._set_scalar(region)
+                if region.log_flow_colours:
+                    try:
+                        logged, floor, clamped = _log10_colour_values(selected)
+                        finite_logged = logged[np.isfinite(logged)]
+                        if finite_logged.size:
+                            psim.TextUnformatted(
+                                "Log10 colour range: "
+                                f"{finite_logged.min():.6g} to {finite_logged.max():.6g}"
+                            )
+                        if clamped:
+                            psim.TextWrapped(
+                                f"{clamped} non-positive value(s) use the lowest colour "
+                                f"at the smallest positive flow ({floor:.6g})."
+                            )
+                        psim.TextWrapped(
+                            "Display only: colours use log10(flow); imported flow values "
+                            "and exported files are unchanged."
+                        )
+                    except ValueError as exc:
+                        psim.TextWrapped(str(exc))
 
             if region.network is not None:
                 changed, value = psim.Combo(

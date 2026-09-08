@@ -90,6 +90,14 @@ uniform thickness. Colour only changes the selected colour map; tube radius is
 an independent geometric control. Flow is mapped linearly over its data range,
 which can be adjusted in Polyscope's Scene panel.
 
+When a flow field is selected, enable **Logarithmic flow colours** to colour by
+``log10(flow)``. This spreads values spanning several orders of magnitude across
+the colour map while leaving the imported flow values unchanged. Any finite
+non-positive values use the colour of the smallest positive flow because a
+base-10 logarithm is not defined for them. The Polyscope legend is labelled with
+the resulting log10 values; for example, 4 represents an original flow of
+``10^4``.
+
 The **Radius scale** control multiplies the selected radius field for display
 without changing the imported data. It uses a logarithmic range from 0.001 to
 10 and starts at 0.25 to reduce overlapping rounded capsules at large proximal

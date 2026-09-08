@@ -7,6 +7,7 @@ import numpy as np
 from LungViZ.application import (
     LungVizApplication,
     _anatomical_plane_axes,
+    _log10_colour_values,
     _sample_volume,
     _slice_geometry,
 )
@@ -442,6 +443,16 @@ def test_named_screenshot_shortcut_uses_save_dialog(monkeypatch):
     assert saved == [True]
 
 
+def test_log_colour_values_clamp_non_positive_entries_to_positive_floor():
+    logged, floor, clamped = _log10_colour_values(
+        np.asarray([100.0, 0.0, -3.0, 0.1, np.nan])
+    )
+
+    assert floor == 0.1
+    assert clamped == 2
+    np.testing.assert_allclose(logged, [2.0, -1.0, -1.0, -1.0, -1.0])
+
+
 def test_native_screenshot_button_opens_save_as_and_moves_capture(
     monkeypatch, tmp_path
 ):
@@ -648,6 +659,14 @@ Element: 3 0 0
     assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"
     assert region.scalar_options[region.scalar_index] == "flow [elements]"
     assert region.network.scalars["flow [elements]"][1]["enabled"]
+    region.log_flow_colours = True
+    app._set_scalar(region)
+    logged_flow, log_options = region.network.scalars["log10(flow [elements])"]
+    np.testing.assert_allclose(
+        logged_flow, np.log10(region.scalar_values["flow [elements]"])
+    )
+    assert log_options["defined_on"] == "edges"
+    assert log_options["enabled"]
     assert region.radius_options[region.radius_index] == "radius_perf [elements]"
     assert region.network.radius_quantity == (
         "smoothed radius: radius_perf [elements]",

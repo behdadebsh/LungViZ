@@ -21,7 +21,6 @@ from .scene import (
     scalar_variants,
 )
 from .surface import SURFACE_EXTENSIONS, load_surface_scene
-from .tube import TubeSurfaceGeometry, build_tube_surface
 from .volume import CTVolume, load_dicom_directory, load_nifti
 
 
@@ -135,6 +134,92 @@ def _finite_for_display(values: np.ndarray) -> np.ndarray:
     finite = values[np.isfinite(values)]
     replacement = float(np.median(finite)) if finite.size else 0.0
     return np.nan_to_num(values, nan=replacement, posinf=replacement, neginf=replacement)
+
+
+def _edge_radii_to_node_radii(
+    edge_radii: np.ndarray, edges: np.ndarray, node_count: int
+) -> np.ndarray:
+    """Derive display-only shared radii so incident tubes meet continuously."""
+
+    radii = np.asarray(edge_radii, dtype=float).reshape(-1)
+    connectivity = np.asarray(edges, dtype=int)
+    if radii.size != len(connectivity):
+        raise ValueError("Each rendered edge must have one radius")
+    squared_sum = np.zeros(node_count, dtype=float)
+    incident_count = np.zeros(node_count, dtype=int)
+    squared = np.square(np.clip(radii, 0.0, None))
+    np.add.at(squared_sum, connectivity[:, 0], squared)
+    np.add.at(squared_sum, connectivity[:, 1], squared)
+    np.add.at(incident_count, connectivity[:, 0], 1)
+    np.add.at(incident_count, connectivity[:, 1], 1)
+    node_radii = np.zeros(node_count, dtype=float)
+    connected = incident_count > 0
+    node_radii[connected] = np.sqrt(
+        squared_sum[connected] / incident_count[connected]
+    )
+    return node_radii
+
+
+def _edge_radii_to_mean_node_radii(
+    edge_radii: np.ndarray, edges: np.ndarray, node_count: int
+) -> np.ndarray:
+    """Match Polyscope's inferred node radius for an edge-radius quantity."""
+
+    radii = np.asarray(edge_radii, dtype=float).reshape(-1)
+    connectivity = np.asarray(edges, dtype=int)
+    if radii.size != len(connectivity):
+        raise ValueError("Each rendered edge must have one radius")
+    radius_sum = np.zeros(node_count, dtype=float)
+    incident_count = np.zeros(node_count, dtype=int)
+    clipped = np.clip(radii, 0.0, None)
+    np.add.at(radius_sum, connectivity[:, 0], clipped)
+    np.add.at(radius_sum, connectivity[:, 1], clipped)
+    np.add.at(incident_count, connectivity[:, 0], 1)
+    np.add.at(incident_count, connectivity[:, 1], 1)
+    node_radii = np.zeros(node_count, dtype=float)
+    connected = incident_count > 0
+    node_radii[connected] = radius_sum[connected] / incident_count[connected]
+    return node_radii
+
+
+def _endpoint_cap_positions(
+    coordinates: np.ndarray, edges: np.ndarray, node_radii: np.ndarray
+) -> np.ndarray:
+    """Inset degree-one display nodes so their rounded caps end at the true tips."""
+
+    points = np.asarray(coordinates, dtype=float)
+    connectivity = np.asarray(edges, dtype=int)
+    radii = np.asarray(node_radii, dtype=float).reshape(-1)
+    if radii.size != len(points):
+        raise ValueError("Each rendered node must have one radius")
+    result = points.copy()
+    if not len(connectivity):
+        return result
+
+    degrees = np.zeros(len(points), dtype=int)
+    np.add.at(degrees, connectivity[:, 0], 1)
+    np.add.at(degrees, connectivity[:, 1], 1)
+    neighbours = np.full(len(points), -1, dtype=int)
+    neighbours[connectivity[:, 0]] = connectivity[:, 1]
+    neighbours[connectivity[:, 1]] = connectivity[:, 0]
+    endpoints = np.flatnonzero(degrees == 1)
+    if not endpoints.size:
+        return result
+
+    directions = points[neighbours[endpoints]] - points[endpoints]
+    lengths = np.linalg.norm(directions, axis=1)
+    valid = lengths > np.finfo(float).eps
+    if not np.any(valid):
+        return result
+    endpoints = endpoints[valid]
+    directions = directions[valid]
+    lengths = lengths[valid]
+    shifts = np.minimum(
+        np.clip(radii[endpoints], 0.0, None),
+        0.45 * lengths,
+    )
+    result[endpoints] += directions * (shifts / lengths)[:, None]
+    return result
 
 
 def _log10_colour_values(values: np.ndarray) -> tuple[np.ndarray, float, int]:
@@ -262,8 +347,6 @@ class RegionState:
     field_structure: object | None = None
     field_structure_name: str = ""
     network: object | None = None
-    tube_surface: object | None = None
-    tube_geometry: TubeSurfaceGeometry | None = None
     scalar_values: Dict[str, np.ndarray] = field(default_factory=dict)
     scalar_locations: Dict[str, str] = field(default_factory=dict)
     scalar_options: List[str] = field(default_factory=list)
@@ -491,8 +574,6 @@ class LungVizApplication:
         region.field_structure = None
         region.field_structure_name = ""
         region.network = None
-        region.tube_surface = None
-        region.tube_geometry = None
         region.edit_handles = None
         region.edit_selection_structure = None
         region.edit_gizmo = None
@@ -820,14 +901,7 @@ class LungVizApplication:
             except ValueError as exc:
                 region.message = str(exc)
         options = {"enabled": True}
-        if region.tube_surface is not None and region.tube_geometry is not None:
-            if region.scalar_locations.get(name, "nodes") == "edges":
-                display_values = display_values[region.tube_geometry.face_edges]
-                options["defined_on"] = "faces"
-            else:
-                display_values = display_values[region.tube_geometry.vertex_nodes]
-                options["defined_on"] = "vertices"
-        elif region.network is not None:
+        if region.network is not None:
             options["defined_on"] = region.scalar_locations.get(name, "nodes")
         if map_range is not None:
             options["vminmax"] = map_range
@@ -861,101 +935,53 @@ class LungVizApplication:
         region.log_flow_bounds[name] = (lower, upper)
         return lower, upper, data_lower, data_upper
 
-    def _remove_tube_surface(self, region: RegionState) -> None:
-        if region.tube_surface is None:
-            return
-        surface = region.tube_surface
-        try:
-            surface.remove()
-        except (AttributeError, RuntimeError):
-            pass
-        try:
-            region.structures.remove(surface)
-        except ValueError:
-            pass
-        region.tube_surface = None
-        region.tube_geometry = None
-        if region.network is not None:
-            region.network.set_enabled(True)
-            region.field_structure = region.network
-            region.field_structure_name = f"{region.name} / 1D mesh"
-
-    def _set_tube_surface(
-        self, region: RegionState, edge_radii: np.ndarray
-    ) -> None:
-        import polyscope as ps
-
-        if not isinstance(region.scene, MeshScene) or region.network is None:
-            return
-        geometry = build_tube_surface(
-            region.scene.coordinates,
-            region.scene.edges,
-            edge_radii,
-            smooth_joins=region.smooth_radius_joins,
-        )
-        if (
-            region.tube_surface is not None
-            and region.tube_geometry is not None
-            and np.array_equal(region.tube_geometry.faces, geometry.faces)
-        ):
-            region.tube_surface.update_vertex_positions(geometry.vertices)
-            region.tube_geometry = geometry
-            if region.scalar_options:
-                self._set_scalar(region)
-            return
-        self._remove_tube_surface(region)
-        structure_name = f"{region.name} / vessel tubes"
-        surface = ps.register_surface_mesh(
-            structure_name,
-            geometry.vertices,
-            geometry.faces,
-            smooth_shade=True,
-            enabled=True,
-        )
-        surface.add_scalar_quantity(
-            "element identifier",
-            region.scene.edge_element_ids[geometry.face_edges].astype(float),
-            defined_on="faces",
-            enabled=False,
-        )
-        surface.set_transform(region.transform)
-        region.network.set_enabled(False)
-        region.tube_surface = surface
-        region.tube_geometry = geometry
-        region.field_structure = surface
-        region.field_structure_name = structure_name
-        region.structures.append(surface)
-        self._set_region_gizmo(region, region.transform_gizmo)
-        if region.scalar_options:
-            self._set_scalar(region)
-
     def _set_radius(self, region: RegionState) -> None:
         if region.network is None:
             return
         region.network.clear_node_radius_quantity()
         region.network.clear_edge_radius_quantity()
+        if isinstance(region.scene, MeshScene):
+            region.network.update_node_positions(region.scene.coordinates)
         if region.radius_index == 0:
-            self._remove_tube_surface(region)
             return
         name = region.radius_options[region.radius_index]
         values = (
             np.clip(_finite_for_display(region.scalar_values[name]), 0.0, None)
             * region.radius_scale
         )
+        quantity_name = f"radius: {name}"
         location = region.scalar_locations.get(name, "nodes")
-        if isinstance(region.scene, MeshScene):
-            edge_values = (
-                values
-                if location == "edges"
-                else 0.5
-                * (
-                    values[region.scene.edges[:, 0]]
-                    + values[region.scene.edges[:, 1]]
+        if location == "edges" and isinstance(region.scene, MeshScene):
+            if region.smooth_radius_joins:
+                quantity_name = f"smoothed radius: {name}"
+                node_values = _edge_radii_to_node_radii(
+                    values, region.scene.edges, len(region.scene.coordinates)
+                )
+                region.network.update_node_positions(
+                    _endpoint_cap_positions(
+                        region.scene.coordinates, region.scene.edges, node_values
+                    )
+                )
+                region.network.add_scalar_quantity(
+                    quantity_name, node_values, defined_on="nodes", enabled=False
+                )
+                region.network.set_node_radius_quantity(quantity_name, autoscale=False)
+                return
+            else:
+                node_values = _edge_radii_to_mean_node_radii(
+                    values, region.scene.edges, len(region.scene.coordinates)
+                )
+                region.network.update_node_positions(
+                    _endpoint_cap_positions(
+                        region.scene.coordinates, region.scene.edges, node_values
+                    )
+                )
+        elif location == "nodes" and isinstance(region.scene, MeshScene):
+            region.network.update_node_positions(
+                _endpoint_cap_positions(
+                    region.scene.coordinates, region.scene.edges, values
                 )
             )
-            self._set_tube_surface(region, edge_values)
-            return
-        quantity_name = f"radius: {name}"
         region.network.add_scalar_quantity(
             quantity_name, values, defined_on=location, enabled=False
         )
@@ -1276,13 +1302,9 @@ class LungVizApplication:
         else:
             assert region.field_structure is not None
             region.field_structure.update_point_positions(updated.coordinates)
-        quantity_structure = (
-            region.network if isinstance(updated, MeshScene) else region.field_structure
-        )
-        assert quantity_structure is not None
         for field_name, values in scalar_variants(updated).items():
             region.scalar_values[field_name] = values
-            quantity_structure.add_scalar_quantity(
+            region.field_structure.add_scalar_quantity(
                 field_name, _finite_for_display(values), enabled=False
             )
         if region.scalar_options:
@@ -1924,9 +1946,10 @@ class LungVizApplication:
                             region.smooth_radius_joins = smooth_joins
                             self._set_radius(region)
                         psim.TextWrapped(
-                            "Display only: smoothly varying triangulated tubes overlap "
-                            "at internal joins. No enlarged node spheres are drawn, and "
-                            "the loaded geometry, connectivity, and fields are unchanged."
+                            "Display only: uses shared node radii to cover tube joins. "
+                            "Rounded inlet and terminal caps end at the original node "
+                            "coordinates without protruding as node blobs. The loaded "
+                            "geometry, connectivity, and radius field are unchanged."
                         )
                     raw_radius = region.scalar_values[radius_name]
                     finite_radius = raw_radius[np.isfinite(raw_radius)]

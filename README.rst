@@ -106,14 +106,19 @@ without changing the imported data. It uses a logarithmic range from 0.001 to
 branches. Choose **Use physical radius (1 x)** whenever the radius and coordinate
 files use compatible units and true physical scale is desired.
 
-Selecting a radius field renders a display-only triangulated tube surface rather
-than enlarged Polyscope node glyphs. Inlet and terminal ends use flat caps, so no
-spherical blobs are drawn anywhere in the tree. **Smooth tube joins** is enabled
-by default: it uses shared junction radii, interpolated frustums, and a short
-internal overlap to close angular gaps at bends and bifurcations. Turn smoothing
-off to draw independent constant-radius cylinders. Neither mode changes node
-coordinates, element connectivity, imported fields, editing, or exported EX
-files.
+For element-based radii, **Smooth tube joins** derives temporary shared node
+radii to cover joins between neighbouring vessel tubes. The calculation uses
+the root-mean-square of incident element radii, retaining more of the larger
+vessel at a junction without using oversized maximum-radius joins. This is
+purely a rendering option: node coordinates, element connectivity, imported
+fields, editing, and exported EX files are unchanged. Turn it off to restore
+Polyscope's standard edge-radius rendering.
+
+At degree-one inlet and terminal nodes, LungViZ shifts only the rendered cap
+centre inward by its displayed radius. The rounded cap therefore ends at the
+original node coordinate instead of protruding around it as a large sphere.
+This display-only adjustment is applied with smoothing on or off; it does not
+alter the coordinates used for editing or EX export.
 
 Use Polyscope's single **Screenshot** button to choose an explicit PNG or JPEG
 filename and folder; ``Ctrl+Shift+S`` opens the same Save As workflow. The

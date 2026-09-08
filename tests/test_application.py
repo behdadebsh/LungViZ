@@ -667,6 +667,16 @@ Element: 3 0 0
     )
     assert log_options["defined_on"] == "edges"
     assert log_options["enabled"]
+    np.testing.assert_allclose(log_options["vminmax"], np.log10([40.0, 100.0]))
+    original_flow = region.scalar_values["flow [elements]"].copy()
+    region.log_flow_bounds["flow [elements]"] = (50.0, 80.0)
+    app._set_scalar(region)
+    logged_flow, log_options = region.network.scalars["log10(flow [elements])"]
+    np.testing.assert_allclose(logged_flow, np.log10(original_flow))
+    np.testing.assert_allclose(log_options["vminmax"], np.log10([50.0, 80.0]))
+    np.testing.assert_array_equal(
+        region.scalar_values["flow [elements]"], original_flow
+    )
     assert region.radius_options[region.radius_index] == "radius_perf [elements]"
     assert region.network.radius_quantity == (
         "smoothed radius: radius_perf [elements]",

@@ -292,6 +292,7 @@ class RegionState:
     coordinate_index: int = 0
     scalar_index: int = 0
     log_flow_colours: bool = False
+    log_flow_bounds: Dict[str, tuple[float, float]] = field(default_factory=dict)
     radius_index: int = 0
     radius_scale: float = 0.25
     smooth_radius_joins: bool = True
@@ -826,18 +827,51 @@ class LungVizApplication:
         name = region.scalar_options[region.scalar_index]
         display_name = name
         display_values = region.scalar_values[name]
+        map_range = None
         if region.log_flow_colours and "flow" in name.lower():
             try:
                 display_values, _floor, _clamped = _log10_colour_values(display_values)
                 display_name = f"log10({name})"
+                lower, upper, _data_lower, _data_upper = self._log_flow_bounds(
+                    region, name
+                )
+                map_range = (np.log10(lower), np.log10(upper))
             except ValueError as exc:
                 region.message = str(exc)
         options = {"enabled": True}
         if region.network is not None:
             options["defined_on"] = region.scalar_locations.get(name, "nodes")
+        if map_range is not None:
+            options["vminmax"] = map_range
         region.field_structure.add_scalar_quantity(
             display_name, _finite_for_display(display_values), **options
         )
+
+    @staticmethod
+    def _log_flow_bounds(
+        region: RegionState, name: str
+    ) -> tuple[float, float, float, float]:
+        """Return valid original-unit bounds for a flow field's log colour map."""
+
+        values = region.scalar_values[name]
+        positive = values[np.isfinite(values) & (values > 0.0)]
+        if not positive.size:
+            raise ValueError(
+                "A logarithmic colour scale requires at least one positive value"
+            )
+        data_lower = float(positive.min())
+        data_upper = float(positive.max())
+        lower, upper = region.log_flow_bounds.get(name, (data_lower, data_upper))
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            lower, upper = data_lower, data_upper
+        lower = float(np.clip(lower, data_lower, data_upper))
+        upper = float(np.clip(upper, data_lower, data_upper))
+        if lower >= upper:
+            lower, upper = data_lower, data_upper
+        if lower >= upper:
+            upper = float(np.nextafter(lower, np.inf))
+        region.log_flow_bounds[name] = (lower, upper)
+        return lower, upper, data_lower, data_upper
 
     def _set_radius(self, region: RegionState) -> None:
         if region.network is None:
@@ -1738,13 +1772,56 @@ class LungVizApplication:
                     self._set_scalar(region)
                 if region.log_flow_colours:
                     try:
-                        logged, floor, clamped = _log10_colour_values(selected)
-                        finite_logged = logged[np.isfinite(logged)]
-                        if finite_logged.size:
-                            psim.TextUnformatted(
-                                "Log10 colour range: "
-                                f"{finite_logged.min():.6g} to {finite_logged.max():.6g}"
+                        _logged, floor, clamped = _log10_colour_values(selected)
+                        lower, upper, data_lower, data_upper = self._log_flow_bounds(
+                            region, selected_name
+                        )
+                        bounds_changed = False
+                        if data_lower < data_upper:
+                            lower_changed, new_lower = psim.SliderFloat(
+                                "Flow colour lower bound",
+                                lower,
+                                data_lower,
+                                data_upper,
+                                "%.6g",
+                                psim.ImGuiSliderFlags_Logarithmic,
                             )
+                            upper_changed, new_upper = psim.SliderFloat(
+                                "Flow colour upper bound",
+                                upper,
+                                data_lower,
+                                data_upper,
+                                "%.6g",
+                                psim.ImGuiSliderFlags_Logarithmic,
+                            )
+                            if lower_changed or upper_changed:
+                                lower = float(new_lower)
+                                upper = float(new_upper)
+                                if lower >= upper:
+                                    if lower_changed and not upper_changed:
+                                        lower = float(np.nextafter(upper, -np.inf))
+                                    else:
+                                        upper = float(np.nextafter(lower, np.inf))
+                                region.log_flow_bounds[selected_name] = (lower, upper)
+                                lower, upper, _data_lower, _data_upper = (
+                                    self._log_flow_bounds(region, selected_name)
+                                )
+                                bounds_changed = True
+                        if psim.Button("Reset flow colour bounds"):
+                            region.log_flow_bounds.pop(selected_name, None)
+                            lower, upper, _data_lower, _data_upper = (
+                                self._log_flow_bounds(region, selected_name)
+                            )
+                            bounds_changed = True
+                        if bounds_changed:
+                            self._set_scalar(region)
+                        psim.TextUnformatted(
+                            f"Active flow bounds: {lower:.6g} to {upper:.6g}"
+                        )
+                        psim.TextUnformatted(
+                            "Polyscope log10 bounds: "
+                            f"{np.log10(lower):.6g} to {np.log10(upper):.6g}"
+                        )
                         if clamped:
                             psim.TextWrapped(
                                 f"{clamped} non-positive value(s) use the lowest colour "

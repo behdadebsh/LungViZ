@@ -7,6 +7,7 @@ import numpy as np
 from LungViZ.application import (
     LungVizApplication,
     _anatomical_plane_axes,
+    _log10_colour_values,
     _sample_volume,
     _slice_geometry,
 )
@@ -442,6 +443,16 @@ def test_named_screenshot_shortcut_uses_save_dialog(monkeypatch):
     assert saved == [True]
 
 
+def test_log_colour_values_clamp_non_positive_entries_to_positive_floor():
+    logged, floor, clamped = _log10_colour_values(
+        np.asarray([100.0, 0.0, -3.0, 0.1, np.nan])
+    )
+
+    assert floor == 0.1
+    assert clamped == 2
+    np.testing.assert_allclose(logged, [2.0, -1.0, -1.0, -1.0, -1.0])
+
+
 def test_native_screenshot_button_opens_save_as_and_moves_capture(
     monkeypatch, tmp_path
 ):
@@ -648,18 +659,52 @@ Element: 3 0 0
     assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"
     assert region.scalar_options[region.scalar_index] == "flow [elements]"
     assert region.network.scalars["flow [elements]"][1]["enabled"]
+    region.log_flow_colours = True
+    app._set_scalar(region)
+    logged_flow, log_options = region.network.scalars["log10(flow [elements])"]
+    np.testing.assert_allclose(
+        logged_flow, np.log10(region.scalar_values["flow [elements]"])
+    )
+    assert log_options["defined_on"] == "edges"
+    assert log_options["enabled"]
+    np.testing.assert_allclose(log_options["vminmax"], np.log10([40.0, 100.0]))
+    original_flow = region.scalar_values["flow [elements]"].copy()
+    region.log_flow_bounds["flow [elements]"] = (50.0, 80.0)
+    app._set_scalar(region)
+    logged_flow, log_options = region.network.scalars["log10(flow [elements])"]
+    np.testing.assert_allclose(logged_flow, np.log10(original_flow))
+    np.testing.assert_allclose(log_options["vminmax"], np.log10([50.0, 80.0]))
+    np.testing.assert_array_equal(
+        region.scalar_values["flow [elements]"], original_flow
+    )
     assert region.radius_options[region.radius_index] == "radius_perf [elements]"
-    assert region.network.edge_radius_quantity == (
-        "radius: radius_perf [elements]",
+    assert region.network.radius_quantity == (
+        "smoothed radius: radius_perf [elements]",
         False,
     )
+    assert region.network.edge_radius_quantity is None
+    expected_node_radii = np.asarray(
+        [0.30, np.sqrt((0.30**2 + 0.20**2 + 0.10**2) / 3), 0.20, 0.10]
+    )
     np.testing.assert_allclose(
-        region.network.scalars["radius: radius_perf [elements]"][0],
-        region.scalar_values["radius_perf [elements]"] * 0.25,
+        region.network.scalars["smoothed radius: radius_perf [elements]"][0],
+        expected_node_radii * 0.25,
     )
 
     region.radius_scale = 0.1
     app._set_radius(region)
+    np.testing.assert_allclose(
+        region.network.scalars["smoothed radius: radius_perf [elements]"][0],
+        expected_node_radii * 0.1,
+    )
+
+    region.smooth_radius_joins = False
+    app._set_radius(region)
+    assert region.network.radius_quantity is None
+    assert region.network.edge_radius_quantity == (
+        "radius: radius_perf [elements]",
+        False,
+    )
     np.testing.assert_allclose(
         region.network.scalars["radius: radius_perf [elements]"][0],
         region.scalar_values["radius_perf [elements]"] * 0.1,

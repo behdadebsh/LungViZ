@@ -90,11 +90,29 @@ uniform thickness. Colour only changes the selected colour map; tube radius is
 an independent geometric control. Flow is mapped linearly over its data range,
 which can be adjusted in Polyscope's Scene panel.
 
+When a flow field is selected, enable **Logarithmic flow colours** to colour by
+``log10(flow)``. This spreads values spanning several orders of magnitude across
+the colour map while leaving the imported flow values unchanged. Adjust **Flow
+colour lower bound** and **Flow colour upper bound** directly below the toggle;
+both sliders use the original flow units and update the log10 map range. Any
+finite non-positive values use the colour of the smallest positive flow because
+a base-10 logarithm is not defined for them. The Polyscope legend is labelled
+with the resulting log10 values; for example, 4 represents an original flow of
+``10^4``. **Reset flow colour bounds** restores the positive data range.
+
 The **Radius scale** control multiplies the selected radius field for display
 without changing the imported data. It uses a logarithmic range from 0.001 to
 10 and starts at 0.25 to reduce overlapping rounded capsules at large proximal
 branches. Choose **Use physical radius (1 x)** whenever the radius and coordinate
 files use compatible units and true physical scale is desired.
+
+For element-based radii, **Smooth tube joins** derives temporary shared node
+radii and draws tapered segments so neighbouring vessels meet continuously. The
+calculation uses the root-mean-square of incident element radii, retaining more
+of the larger vessel at a junction without using oversized maximum-radius joins.
+This is purely a rendering option: node coordinates, element connectivity,
+imported fields, editing, and exported EX files are unchanged. Turn it off to
+restore exact constant-radius cylinders for each element.
 
 Use Polyscope's single **Screenshot** button to choose an explicit PNG or JPEG
 filename and folder; ``Ctrl+Shift+S`` opens the same Save As workflow. The

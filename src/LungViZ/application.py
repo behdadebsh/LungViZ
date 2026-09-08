@@ -136,6 +136,43 @@ def _finite_for_display(values: np.ndarray) -> np.ndarray:
     return np.nan_to_num(values, nan=replacement, posinf=replacement, neginf=replacement)
 
 
+def _edge_radii_to_node_radii(
+    edge_radii: np.ndarray, edges: np.ndarray, node_count: int
+) -> np.ndarray:
+    """Derive display-only shared radii so incident tubes meet continuously."""
+
+    radii = np.asarray(edge_radii, dtype=float).reshape(-1)
+    connectivity = np.asarray(edges, dtype=int)
+    if radii.size != len(connectivity):
+        raise ValueError("Each rendered edge must have one radius")
+    squared_sum = np.zeros(node_count, dtype=float)
+    incident_count = np.zeros(node_count, dtype=int)
+    squared = np.square(np.clip(radii, 0.0, None))
+    np.add.at(squared_sum, connectivity[:, 0], squared)
+    np.add.at(squared_sum, connectivity[:, 1], squared)
+    np.add.at(incident_count, connectivity[:, 0], 1)
+    np.add.at(incident_count, connectivity[:, 1], 1)
+    node_radii = np.zeros(node_count, dtype=float)
+    connected = incident_count > 0
+    node_radii[connected] = np.sqrt(
+        squared_sum[connected] / incident_count[connected]
+    )
+    return node_radii
+
+
+def _log10_colour_values(values: np.ndarray) -> tuple[np.ndarray, float, int]:
+    """Return log10 display values, clamping non-positive entries to the floor."""
+
+    raw = np.asarray(values, dtype=float)
+    positive = raw[np.isfinite(raw) & (raw > 0.0)]
+    if not positive.size:
+        raise ValueError("A logarithmic colour scale requires at least one positive value")
+    floor = float(positive.min())
+    non_positive_count = int(np.count_nonzero(np.isfinite(raw) & (raw <= 0.0)))
+    safe = np.where(np.isfinite(raw) & (raw > 0.0), raw, floor)
+    return np.log10(safe), floor, non_positive_count
+
+
 def _display_indices(size: int, maximum: int = 384) -> np.ndarray:
     if size <= maximum:
         return np.arange(size, dtype=int)
@@ -254,8 +291,11 @@ class RegionState:
     radius_options: List[str] = field(default_factory=lambda: ["Constant"])
     coordinate_index: int = 0
     scalar_index: int = 0
+    log_flow_colours: bool = False
+    log_flow_bounds: Dict[str, tuple[float, float]] = field(default_factory=dict)
     radius_index: int = 0
     radius_scale: float = 0.25
+    smooth_radius_joins: bool = True
     transform_gizmo: bool = False
     surface_opacity: float = 0.65
     transform: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=float))
@@ -785,12 +825,53 @@ class LungVizApplication:
         if region.field_structure is None or not region.scalar_options:
             return
         name = region.scalar_options[region.scalar_index]
+        display_name = name
+        display_values = region.scalar_values[name]
+        map_range = None
+        if region.log_flow_colours and "flow" in name.lower():
+            try:
+                display_values, _floor, _clamped = _log10_colour_values(display_values)
+                display_name = f"log10({name})"
+                lower, upper, _data_lower, _data_upper = self._log_flow_bounds(
+                    region, name
+                )
+                map_range = (np.log10(lower), np.log10(upper))
+            except ValueError as exc:
+                region.message = str(exc)
         options = {"enabled": True}
         if region.network is not None:
             options["defined_on"] = region.scalar_locations.get(name, "nodes")
+        if map_range is not None:
+            options["vminmax"] = map_range
         region.field_structure.add_scalar_quantity(
-            name, _finite_for_display(region.scalar_values[name]), **options
+            display_name, _finite_for_display(display_values), **options
         )
+
+    @staticmethod
+    def _log_flow_bounds(
+        region: RegionState, name: str
+    ) -> tuple[float, float, float, float]:
+        """Return valid original-unit bounds for a flow field's log colour map."""
+
+        values = region.scalar_values[name]
+        positive = values[np.isfinite(values) & (values > 0.0)]
+        if not positive.size:
+            raise ValueError(
+                "A logarithmic colour scale requires at least one positive value"
+            )
+        data_lower = float(positive.min())
+        data_upper = float(positive.max())
+        lower, upper = region.log_flow_bounds.get(name, (data_lower, data_upper))
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            lower, upper = data_lower, data_upper
+        lower = float(np.clip(lower, data_lower, data_upper))
+        upper = float(np.clip(upper, data_lower, data_upper))
+        if lower >= upper:
+            lower, upper = data_lower, data_upper
+        if lower >= upper:
+            upper = float(np.nextafter(lower, np.inf))
+        region.log_flow_bounds[name] = (lower, upper)
+        return lower, upper, data_lower, data_upper
 
     def _set_radius(self, region: RegionState) -> None:
         if region.network is None:
@@ -806,6 +887,20 @@ class LungVizApplication:
         )
         quantity_name = f"radius: {name}"
         location = region.scalar_locations.get(name, "nodes")
+        if (
+            location == "edges"
+            and region.smooth_radius_joins
+            and isinstance(region.scene, MeshScene)
+        ):
+            quantity_name = f"smoothed radius: {name}"
+            node_values = _edge_radii_to_node_radii(
+                values, region.scene.edges, len(region.scene.coordinates)
+            )
+            region.network.add_scalar_quantity(
+                quantity_name, node_values, defined_on="nodes", enabled=False
+            )
+            region.network.set_node_radius_quantity(quantity_name, autoscale=False)
+            return
         region.network.add_scalar_quantity(
             quantity_name, values, defined_on=location, enabled=False
         )
@@ -1663,10 +1758,81 @@ class LungVizApplication:
                 self._set_scalar(region)
             if psim.Button("Apply colour field"):
                 self._set_scalar(region)
-            selected = region.scalar_values[region.scalar_options[region.scalar_index]]
+            selected_name = region.scalar_options[region.scalar_index]
+            selected = region.scalar_values[selected_name]
             finite = selected[np.isfinite(selected)]
             if finite.size:
                 psim.TextUnformatted(f"Range: {finite.min():.6g} to {finite.max():.6g}")
+            if "flow" in selected_name.lower():
+                changed, logarithmic = psim.Checkbox(
+                    "Logarithmic flow colours", region.log_flow_colours
+                )
+                if changed:
+                    region.log_flow_colours = logarithmic
+                    self._set_scalar(region)
+                if region.log_flow_colours:
+                    try:
+                        _logged, floor, clamped = _log10_colour_values(selected)
+                        lower, upper, data_lower, data_upper = self._log_flow_bounds(
+                            region, selected_name
+                        )
+                        bounds_changed = False
+                        if data_lower < data_upper:
+                            lower_changed, new_lower = psim.SliderFloat(
+                                "Flow colour lower bound",
+                                lower,
+                                data_lower,
+                                data_upper,
+                                "%.6g",
+                                psim.ImGuiSliderFlags_Logarithmic,
+                            )
+                            upper_changed, new_upper = psim.SliderFloat(
+                                "Flow colour upper bound",
+                                upper,
+                                data_lower,
+                                data_upper,
+                                "%.6g",
+                                psim.ImGuiSliderFlags_Logarithmic,
+                            )
+                            if lower_changed or upper_changed:
+                                lower = float(new_lower)
+                                upper = float(new_upper)
+                                if lower >= upper:
+                                    if lower_changed and not upper_changed:
+                                        lower = float(np.nextafter(upper, -np.inf))
+                                    else:
+                                        upper = float(np.nextafter(lower, np.inf))
+                                region.log_flow_bounds[selected_name] = (lower, upper)
+                                lower, upper, _data_lower, _data_upper = (
+                                    self._log_flow_bounds(region, selected_name)
+                                )
+                                bounds_changed = True
+                        if psim.Button("Reset flow colour bounds"):
+                            region.log_flow_bounds.pop(selected_name, None)
+                            lower, upper, _data_lower, _data_upper = (
+                                self._log_flow_bounds(region, selected_name)
+                            )
+                            bounds_changed = True
+                        if bounds_changed:
+                            self._set_scalar(region)
+                        psim.TextUnformatted(
+                            f"Active flow bounds: {lower:.6g} to {upper:.6g}"
+                        )
+                        psim.TextUnformatted(
+                            "Polyscope log10 bounds: "
+                            f"{np.log10(lower):.6g} to {np.log10(upper):.6g}"
+                        )
+                        if clamped:
+                            psim.TextWrapped(
+                                f"{clamped} non-positive value(s) use the lowest colour "
+                                f"at the smallest positive flow ({floor:.6g})."
+                            )
+                        psim.TextWrapped(
+                            "Display only: colours use log10(flow); imported flow values "
+                            "and exported files are unchanged."
+                        )
+                    except ValueError as exc:
+                        psim.TextWrapped(str(exc))
 
             if region.network is not None:
                 changed, value = psim.Combo(
@@ -1691,6 +1857,17 @@ class LungVizApplication:
                     self._set_radius(region)
                 if region.radius_index > 0:
                     radius_name = region.radius_options[region.radius_index]
+                    if region.scalar_locations.get(radius_name) == "edges":
+                        changed, smooth_joins = psim.Checkbox(
+                            "Smooth tube joins", region.smooth_radius_joins
+                        )
+                        if changed:
+                            region.smooth_radius_joins = smooth_joins
+                            self._set_radius(region)
+                        psim.TextWrapped(
+                            "Display only: uses shared node radii and tapered segments. "
+                            "The loaded geometry, connectivity, and radius field are unchanged."
+                        )
                     raw_radius = region.scalar_values[radius_name]
                     finite_radius = raw_radius[np.isfinite(raw_radius)]
                     if finite_radius.size:

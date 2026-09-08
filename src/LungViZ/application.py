@@ -160,6 +160,44 @@ def _edge_radii_to_node_radii(
     return node_radii
 
 
+def _edge_radii_to_mean_node_radii(
+    edge_radii: np.ndarray, edges: np.ndarray, node_count: int
+) -> np.ndarray:
+    """Match Polyscope's inferred node radius for an edge-radius quantity."""
+
+    radii = np.asarray(edge_radii, dtype=float).reshape(-1)
+    connectivity = np.asarray(edges, dtype=int)
+    if radii.size != len(connectivity):
+        raise ValueError("Each rendered edge must have one radius")
+    radius_sum = np.zeros(node_count, dtype=float)
+    incident_count = np.zeros(node_count, dtype=int)
+    clipped = np.clip(radii, 0.0, None)
+    np.add.at(radius_sum, connectivity[:, 0], clipped)
+    np.add.at(radius_sum, connectivity[:, 1], clipped)
+    np.add.at(incident_count, connectivity[:, 0], 1)
+    np.add.at(incident_count, connectivity[:, 1], 1)
+    node_radii = np.zeros(node_count, dtype=float)
+    connected = incident_count > 0
+    node_radii[connected] = radius_sum[connected] / incident_count[connected]
+    return node_radii
+
+
+def _hide_degree_one_node_radii(
+    node_radii: np.ndarray, edges: np.ndarray, node_count: int
+) -> np.ndarray:
+    """Hide inlet/outlet node glyphs without changing any edge radius."""
+
+    result = np.asarray(node_radii, dtype=float).reshape(-1).copy()
+    if result.size != node_count:
+        raise ValueError("Each rendered node must have one radius")
+    connectivity = np.asarray(edges, dtype=int)
+    degrees = np.zeros(node_count, dtype=int)
+    np.add.at(degrees, connectivity[:, 0], 1)
+    np.add.at(degrees, connectivity[:, 1], 1)
+    result[degrees == 1] = 0.0
+    return result
+
+
 def _log10_colour_values(values: np.ndarray) -> tuple[np.ndarray, float, int]:
     """Return log10 display values, clamping non-positive entries to the floor."""
 
@@ -296,6 +334,7 @@ class RegionState:
     radius_index: int = 0
     radius_scale: float = 0.25
     smooth_radius_joins: bool = True
+    show_endpoint_spheres: bool = False
     transform_gizmo: bool = False
     surface_opacity: float = 0.65
     transform: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=float))
@@ -887,20 +926,36 @@ class LungVizApplication:
         )
         quantity_name = f"radius: {name}"
         location = region.scalar_locations.get(name, "nodes")
-        if (
-            location == "edges"
-            and region.smooth_radius_joins
-            and isinstance(region.scene, MeshScene)
-        ):
-            quantity_name = f"smoothed radius: {name}"
-            node_values = _edge_radii_to_node_radii(
-                values, region.scene.edges, len(region.scene.coordinates)
-            )
-            region.network.add_scalar_quantity(
-                quantity_name, node_values, defined_on="nodes", enabled=False
-            )
-            region.network.set_node_radius_quantity(quantity_name, autoscale=False)
-            return
+        if location == "edges" and isinstance(region.scene, MeshScene):
+            node_values = None
+            if region.smooth_radius_joins:
+                quantity_name = f"smoothed radius: {name}"
+                node_values = _edge_radii_to_node_radii(
+                    values, region.scene.edges, len(region.scene.coordinates)
+                )
+            elif not region.show_endpoint_spheres:
+                quantity_name = f"endpoint-filtered radius: {name}"
+                node_values = _edge_radii_to_mean_node_radii(
+                    values, region.scene.edges, len(region.scene.coordinates)
+                )
+            if not region.show_endpoint_spheres:
+                node_values = _hide_degree_one_node_radii(
+                    node_values, region.scene.edges, len(region.scene.coordinates)
+                )
+            if node_values is not None:
+                region.network.add_scalar_quantity(
+                    quantity_name, node_values, defined_on="nodes", enabled=False
+                )
+                region.network.set_node_radius_quantity(quantity_name, autoscale=False)
+                if not region.show_endpoint_spheres:
+                    edge_quantity_name = f"radius: {name}"
+                    region.network.add_scalar_quantity(
+                        edge_quantity_name, values, defined_on="edges", enabled=False
+                    )
+                    region.network.set_edge_radius_quantity(
+                        edge_quantity_name, autoscale=False
+                    )
+                return
         region.network.add_scalar_quantity(
             quantity_name, values, defined_on=location, enabled=False
         )
@@ -1865,8 +1920,20 @@ class LungVizApplication:
                             region.smooth_radius_joins = smooth_joins
                             self._set_radius(region)
                         psim.TextWrapped(
-                            "Display only: uses shared node radii and tapered segments. "
+                            "Display only: uses shared node radii to cover tube joins. "
                             "The loaded geometry, connectivity, and radius field are unchanged."
+                        )
+                        changed, show_endpoints = psim.Checkbox(
+                            "Show inlet / terminal node spheres",
+                            region.show_endpoint_spheres,
+                        )
+                        if changed:
+                            region.show_endpoint_spheres = show_endpoints
+                            self._set_radius(region)
+                        psim.TextWrapped(
+                            "When disabled, degree-one node glyphs are hidden while the "
+                            "element tubes retain their radius. Internal junction nodes "
+                            "remain visible to cover branch joins."
                         )
                     raw_radius = region.scalar_values[radius_name]
                     finite_radius = raw_radius[np.isfinite(raw_radius)]

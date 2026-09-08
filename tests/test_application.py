@@ -682,9 +682,12 @@ Element: 3 0 0
         "smoothed radius: radius_perf [elements]",
         False,
     )
-    assert region.network.edge_radius_quantity is None
+    assert region.network.edge_radius_quantity == (
+        "radius: radius_perf [elements]",
+        False,
+    )
     expected_node_radii = np.asarray(
-        [0.30, np.sqrt((0.30**2 + 0.20**2 + 0.10**2) / 3), 0.20, 0.10]
+        [0.0, np.sqrt((0.30**2 + 0.20**2 + 0.10**2) / 3), 0.0, 0.0]
     )
     np.testing.assert_allclose(
         region.network.scalars["smoothed radius: radius_perf [elements]"][0],
@@ -698,6 +701,17 @@ Element: 3 0 0
         expected_node_radii * 0.1,
     )
 
+    region.show_endpoint_spheres = True
+    app._set_radius(region)
+    assert region.network.edge_radius_quantity is None
+    shown_node_radii = np.asarray(
+        [0.30, np.sqrt((0.30**2 + 0.20**2 + 0.10**2) / 3), 0.20, 0.10]
+    )
+    np.testing.assert_allclose(
+        region.network.scalars["smoothed radius: radius_perf [elements]"][0],
+        shown_node_radii * 0.1,
+    )
+
     region.smooth_radius_joins = False
     app._set_radius(region)
     assert region.network.radius_quantity is None
@@ -708,6 +722,23 @@ Element: 3 0 0
     np.testing.assert_allclose(
         region.network.scalars["radius: radius_perf [elements]"][0],
         region.scalar_values["radius_perf [elements]"] * 0.1,
+    )
+
+    region.show_endpoint_spheres = False
+    app._set_radius(region)
+    assert region.network.radius_quantity == (
+        "endpoint-filtered radius: radius_perf [elements]",
+        False,
+    )
+    assert region.network.edge_radius_quantity == (
+        "radius: radius_perf [elements]",
+        False,
+    )
+    np.testing.assert_allclose(
+        region.network.scalars[
+            "endpoint-filtered radius: radius_perf [elements]"
+        ][0],
+        np.asarray([0.0, (0.30 + 0.20 + 0.10) / 3, 0.0, 0.0]) * 0.1,
     )
 
     assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"

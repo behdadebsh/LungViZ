@@ -106,18 +106,14 @@ without changing the imported data. It uses a logarithmic range from 0.001 to
 branches. Choose **Use physical radius (1 x)** whenever the radius and coordinate
 files use compatible units and true physical scale is desired.
 
-For element-based radii, **Smooth tube joins** derives temporary shared node
-radii to cover joins between neighbouring vessel tubes. The calculation uses
-the root-mean-square of incident element radii, retaining more of the larger
-vessel at a junction without using oversized maximum-radius joins. This is
-purely a rendering option: node coordinates, element connectivity, imported
-fields, editing, and exported EX files are unchanged. Turn it off to restore
-Polyscope's standard edge-radius rendering.
-
-Degree-one node spheres at the tree inlet and terminal tips are hidden by
-default, while the element tubes retain their selected radii. Internal node
-glyphs remain available to cover joins at bifurcations. Enable **Show inlet /
-terminal node spheres** to restore Polyscope's standard endpoint-node rendering.
+Selecting a radius field renders a display-only triangulated tube surface rather
+than enlarged Polyscope node glyphs. Inlet and terminal ends use flat caps, so no
+spherical blobs are drawn anywhere in the tree. **Smooth tube joins** is enabled
+by default: it uses shared junction radii, interpolated frustums, and a short
+internal overlap to close angular gaps at bends and bifurcations. Turn smoothing
+off to draw independent constant-radius cylinders. Neither mode changes node
+coordinates, element connectivity, imported fields, editing, or exported EX
+files.
 
 Use Polyscope's single **Screenshot** button to choose an explicit PNG or JPEG
 filename and folder; ``Ctrl+Shift+S`` opens the same Save As workflow. The

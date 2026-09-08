@@ -218,15 +218,21 @@ def test_application_loads_mesh_data_and_visual_quantities(monkeypatch):
 
     region.scalar_index = region.scalar_options.index("pressure")
     app._set_scalar(region)
-    assert region.network.scalars["pressure"][1]["enabled"]
+    assert region.tube_surface.scalars["pressure"][1]["enabled"]
 
     region.radius_index = region.radius_options.index("radius")
     app._set_radius(region)
-    assert region.network.radius_quantity == ("radius: radius", False)
+    assert region.tube_surface is not None
+    assert region.tube_geometry is not None
+    assert region.field_structure is region.tube_surface
+    assert not region.network.enabled
+    pressure_values, pressure_options = region.tube_surface.scalars["pressure"]
     np.testing.assert_allclose(
-        region.network.scalars["radius: radius"][0],
-        region.scalar_values["radius"] * 0.25,
+        pressure_values,
+        region.scalar_values["pressure"][region.tube_geometry.vertex_nodes],
     )
+    assert pressure_options["defined_on"] == "vertices"
+    assert pressure_options["enabled"]
 
 
 def test_regions_keep_repeated_node_identifiers_isolated(monkeypatch, tmp_path):
@@ -658,88 +664,61 @@ Element: 3 0 0
     assert region.scalar_locations["flow [elements]"] == "edges"
     assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"
     assert region.scalar_options[region.scalar_index] == "flow [elements]"
-    assert region.network.scalars["flow [elements]"][1]["enabled"]
+    assert region.tube_surface is not None
+    assert region.tube_geometry is not None
+    assert not region.network.enabled
+    flow_values, flow_options = region.tube_surface.scalars["flow [elements]"]
+    np.testing.assert_allclose(
+        flow_values,
+        region.scalar_values["flow [elements]"][region.tube_geometry.face_edges],
+    )
+    assert flow_options["defined_on"] == "faces"
+    assert flow_options["enabled"]
     region.log_flow_colours = True
     app._set_scalar(region)
-    logged_flow, log_options = region.network.scalars["log10(flow [elements])"]
+    logged_flow, log_options = region.tube_surface.scalars[
+        "log10(flow [elements])"
+    ]
     np.testing.assert_allclose(
-        logged_flow, np.log10(region.scalar_values["flow [elements]"])
+        logged_flow,
+        np.log10(region.scalar_values["flow [elements]"])[
+            region.tube_geometry.face_edges
+        ],
     )
-    assert log_options["defined_on"] == "edges"
+    assert log_options["defined_on"] == "faces"
     assert log_options["enabled"]
     np.testing.assert_allclose(log_options["vminmax"], np.log10([40.0, 100.0]))
     original_flow = region.scalar_values["flow [elements]"].copy()
     region.log_flow_bounds["flow [elements]"] = (50.0, 80.0)
     app._set_scalar(region)
-    logged_flow, log_options = region.network.scalars["log10(flow [elements])"]
-    np.testing.assert_allclose(logged_flow, np.log10(original_flow))
+    logged_flow, log_options = region.tube_surface.scalars[
+        "log10(flow [elements])"
+    ]
+    np.testing.assert_allclose(
+        logged_flow, np.log10(original_flow)[region.tube_geometry.face_edges]
+    )
     np.testing.assert_allclose(log_options["vminmax"], np.log10([50.0, 80.0]))
     np.testing.assert_array_equal(
         region.scalar_values["flow [elements]"], original_flow
     )
     assert region.radius_options[region.radius_index] == "radius_perf [elements]"
-    assert region.network.radius_quantity == (
-        "smoothed radius: radius_perf [elements]",
-        False,
-    )
-    assert region.network.edge_radius_quantity == (
-        "radius: radius_perf [elements]",
-        False,
-    )
-    expected_node_radii = np.asarray(
-        [0.0, np.sqrt((0.30**2 + 0.20**2 + 0.10**2) / 3), 0.0, 0.0]
-    )
-    np.testing.assert_allclose(
-        region.network.scalars["smoothed radius: radius_perf [elements]"][0],
-        expected_node_radii * 0.25,
-    )
+    assert region.network.radius_quantity is None
+    assert region.network.edge_radius_quantity is None
+    smooth_geometry = region.tube_geometry
+    smooth_vertices = smooth_geometry.vertices.copy()
 
     region.radius_scale = 0.1
     app._set_radius(region)
-    np.testing.assert_allclose(
-        region.network.scalars["smoothed radius: radius_perf [elements]"][0],
-        expected_node_radii * 0.1,
-    )
-
-    region.show_endpoint_spheres = True
-    app._set_radius(region)
-    assert region.network.edge_radius_quantity is None
-    shown_node_radii = np.asarray(
-        [0.30, np.sqrt((0.30**2 + 0.20**2 + 0.10**2) / 3), 0.20, 0.10]
-    )
-    np.testing.assert_allclose(
-        region.network.scalars["smoothed radius: radius_perf [elements]"][0],
-        shown_node_radii * 0.1,
-    )
+    assert region.tube_geometry is not None
+    assert not np.allclose(region.tube_geometry.vertices, smooth_vertices)
 
     region.smooth_radius_joins = False
     app._set_radius(region)
-    assert region.network.radius_quantity is None
-    assert region.network.edge_radius_quantity == (
-        "radius: radius_perf [elements]",
-        False,
-    )
-    np.testing.assert_allclose(
-        region.network.scalars["radius: radius_perf [elements]"][0],
-        region.scalar_values["radius_perf [elements]"] * 0.1,
-    )
-
-    region.show_endpoint_spheres = False
-    app._set_radius(region)
-    assert region.network.radius_quantity == (
-        "endpoint-filtered radius: radius_perf [elements]",
-        False,
-    )
-    assert region.network.edge_radius_quantity == (
-        "radius: radius_perf [elements]",
-        False,
-    )
-    np.testing.assert_allclose(
-        region.network.scalars[
-            "endpoint-filtered radius: radius_perf [elements]"
-        ][0],
-        np.asarray([0.0, (0.30 + 0.20 + 0.10) / 3, 0.0, 0.0]) * 0.1,
-    )
+    assert region.tube_geometry is not None
+    assert len(region.tube_geometry.faces) > len(smooth_geometry.faces)
+    assert region.tube_surface.scalars["log10(flow [elements])"][1][
+        "defined_on"
+    ] == "faces"
 
     assert region.network.scalars["flow [elements]"][1]["defined_on"] == "edges"
 

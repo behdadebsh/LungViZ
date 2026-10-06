@@ -599,6 +599,15 @@ def write_exnode_coordinates(
                 for index, component in enumerate(definition.components[:3])
                 if index < len(coordinates)
             }
+            derivatives = node.derivatives.get(coordinate_field)
+            if derivatives is not None:
+                replacements.update(
+                    {
+                        component.value_index + 1: float(derivatives[index])
+                        for index, component in enumerate(definition.components[:3])
+                        if component.derivatives >= 1 and index < len(derivatives)
+                    }
+                )
             lines[value_start:value_end] = _replace_numeric_values(
                 lines[value_start:value_end], replacements
             )

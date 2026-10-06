@@ -12,7 +12,7 @@ from LungViZ.application import (
     _sample_volume,
     _slice_geometry,
 )
-from LungViZ.exfile import parse_exnode
+from LungViZ.exfile import parse_exelem, parse_exnode
 from LungViZ.model import MeshScene, PointScene, SurfaceScene
 from LungViZ.volume import CTVolume
 
@@ -305,6 +305,64 @@ def test_node_edit_translation_updates_connected_mesh_and_supports_history(
     np.testing.assert_allclose(
         exported.nodes[1].fields["coordinates"], original[1] + [2, -1, 0.5]
     )
+
+
+def test_delete_node_removes_connected_elements_and_supports_undo_export(
+    monkeypatch, tmp_path
+):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region(
+        [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
+    )
+    app._set_edit_mode(region, True)
+    app._select_edit_nodes(region, [2])
+
+    app._delete_selected_nodes(region)
+
+    assert isinstance(region.scene, MeshScene)
+    np.testing.assert_array_equal(region.scene.node_ids, [1, 2, 4])
+    np.testing.assert_array_equal(region.scene.edge_element_ids, [1, 3])
+    assert [node.identifier for node in region.node_documents[0].nodes] == [1, 2, 4]
+    assert [
+        element.display_identifier for element in region.element_documents[0].elements
+    ] == [1, 3]
+    assert region.edit_selected == []
+    assert "1 connected element" in region.message
+
+    app._undo_node_edit(region)
+    np.testing.assert_array_equal(region.scene.node_ids, [1, 2, 3, 4])
+    np.testing.assert_array_equal(region.scene.edge_element_ids, [1, 2, 3])
+
+    app._redo_node_edit(region)
+    np.testing.assert_array_equal(region.scene.node_ids, [1, 2, 4])
+    np.testing.assert_array_equal(region.scene.edge_element_ids, [1, 3])
+
+    exported = app.export_edited_ex_files(region, tmp_path / "pruned.exnode")
+    assert exported == [tmp_path / "pruned.exnode", tmp_path / "pruned.exelem"]
+    assert [node.identifier for node in parse_exnode(exported[0]).nodes] == [1, 2, 4]
+    assert [
+        element.display_identifier for element in parse_exelem(exported[1]).elements
+    ] == [1, 3]
+
+
+def test_delete_point_and_reject_deleting_every_point(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region([EXAMPLES / "sample.exnode"])
+    app._set_edit_mode(region, True)
+    app._select_edit_nodes(region, [0, 3])
+
+    app._delete_selected_nodes(region)
+
+    assert isinstance(region.scene, PointScene)
+    np.testing.assert_array_equal(region.scene.node_ids, [2, 3])
+    app._select_edit_nodes(region, [0, 1])
+    with np.testing.assert_raises_regex(ValueError, "At least one"):
+        app._delete_selected_nodes(region)
+    np.testing.assert_array_equal(region.scene.node_ids, [2, 3])
 
 
 def test_standalone_exnode_and_exdata_regions_can_edit_points(monkeypatch):

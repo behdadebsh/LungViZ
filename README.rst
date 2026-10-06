@@ -18,7 +18,8 @@ Features
 * Colour a network by any nodal or element scalar field, vector component, or magnitude.
 * Render radius fields as variable-radius tubes with an adjustable display scale.
 * Select one or many mesh nodes and move them with the mouse or an exact translation vector.
-* Undo, redo, reset, and export edited coordinates to a new ``.exnode`` file.
+* Delete selected nodes together with every connected element.
+* Undo, redo, reset, and export edited node and element records to new EX files.
 * Display multi-component fields as Polyscope vectors.
 * Overlay ``.exdata`` locations and their fields as point clouds.
 * Display standalone ``.exnode`` regions as independent point clouds.

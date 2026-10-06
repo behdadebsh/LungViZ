@@ -7,6 +7,7 @@ from LungViZ.exfile import (
     ExFileError,
     parse_exelem,
     parse_exnode,
+    write_exelem_records,
     write_exnode_coordinates,
 )
 
@@ -146,3 +147,22 @@ def test_export_edited_coordinates_preserves_other_node_fields(tmp_path):
         parse_exnode(EXAMPLES / "sample.exnode").nodes[1].fields["coordinates"],
         [1.0, 0.0, 0.0],
     )
+
+
+def test_export_omits_deleted_node_and_element_records(tmp_path):
+    nodes = parse_exnode(EXAMPLES / "sample.exnode")
+    elements = parse_exelem(EXAMPLES / "sample.exelem")
+    nodes.nodes[:] = [node for node in nodes.nodes if node.identifier != 3]
+    elements.elements[:] = [
+        element for element in elements.elements if element.display_identifier != 2
+    ]
+
+    node_path = write_exnode_coordinates(
+        nodes, tmp_path / "pruned.exnode", "coordinates"
+    )
+    element_path = write_exelem_records(elements, tmp_path / "pruned.exelem")
+
+    assert [node.identifier for node in parse_exnode(node_path).nodes] == [1, 2, 4]
+    assert [
+        element.display_identifier for element in parse_exelem(element_path).elements
+    ] == [1, 3]

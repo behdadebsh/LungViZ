@@ -538,7 +538,7 @@ def write_exnode_coordinates(
     destination: str | Path,
     coordinate_field: str | None = None,
 ) -> Path:
-    """Write edited coordinates while preserving the source EXNODE structure."""
+    """Write edited coordinates and current nodes while preserving EXNODE structure."""
 
     source = document.path.resolve()
     target = Path(destination).expanduser().resolve()
@@ -589,6 +589,9 @@ def write_exnode_coordinates(
 
         definition = active_fields.get(coordinate_field)
         node = nodes.get(node_id)
+        if node is None:
+            del lines[cursor:value_end]
+            continue
         if definition is not None and node is not None and coordinate_field in node.fields:
             coordinates = node.fields[coordinate_field]
             replacements = {
@@ -604,6 +607,57 @@ def write_exnode_coordinates(
     try:
         target.write_text(
             "\n".join(lines) + ("\n" if raw_text.endswith(("\n", "\r")) else ""),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise ExFileError(f"Could not write {target}: {exc}") from exc
+    return target
+
+
+def write_exelem_records(
+    document: ElementDocument,
+    destination: str | Path,
+) -> Path:
+    """Write only the element records currently present in an EXELEM document."""
+
+    source = document.path.resolve()
+    target = Path(destination).expanduser().resolve()
+    if target == source:
+        raise ExFileError("Export to a new file rather than overwriting the loaded EXELEM")
+    try:
+        raw_text = source.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise ExFileError(f"Could not read {source}: {exc}") from exc
+
+    lines = raw_text.splitlines()
+    retained = {element.identifier for element in document.elements}
+    output: List[str] = []
+    cursor = 0
+    while cursor < len(lines):
+        match = _ELEMENT_RE.match(lines[cursor])
+        if not match:
+            output.append(lines[cursor])
+            cursor += 1
+            continue
+        identifier = tuple(int(value) for value in match.groups())
+        block_end = cursor + 1
+        while block_end < len(lines):
+            candidate = lines[block_end]
+            if (
+                _ELEMENT_RE.match(candidate)
+                or _SHAPE_RE.search(candidate)
+                or _GROUP_RE.match(candidate)
+                or re.match(r"^\s*#Fields\s*=", candidate, re.IGNORECASE)
+            ):
+                break
+            block_end += 1
+        if identifier in retained:
+            output.extend(lines[cursor:block_end])
+        cursor = block_end
+
+    try:
+        target.write_text(
+            "\n".join(output) + ("\n" if raw_text.endswith(("\n", "\r")) else ""),
             encoding="utf-8",
         )
     except OSError as exc:

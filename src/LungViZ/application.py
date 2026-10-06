@@ -11,8 +11,21 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
-from .exfile import ExFileError, load_ex_file, write_exnode_coordinates
-from .model import ElementDocument, MeshScene, NodeDocument, PointScene, SurfaceScene
+from .exfile import (
+    ExFileError,
+    load_ex_file,
+    write_exelem_records,
+    write_exnode_coordinates,
+)
+from .model import (
+    ElementDocument,
+    ElementRecord,
+    MeshScene,
+    NodeDocument,
+    NodeRecord,
+    PointScene,
+    SurfaceScene,
+)
 from .scene import (
     build_mesh_scene,
     build_point_scene,
@@ -376,8 +389,8 @@ class RegionState:
         default_factory=lambda: np.zeros(3, dtype=float)
     )
     edit_absolute: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float))
-    edit_undo: List["NodeEdit"] = field(default_factory=list)
-    edit_redo: List["NodeEdit"] = field(default_factory=list)
+    edit_undo: List["NodeEdit | TopologyEdit"] = field(default_factory=list)
+    edit_redo: List["NodeEdit | TopologyEdit"] = field(default_factory=list)
     edit_gizmo_transform: np.ndarray | None = None
     edit_mouse_active: bool = False
     edit_mouse_history: "NodeEdit | None" = None
@@ -389,6 +402,12 @@ class NodeEdit:
     before: np.ndarray
     after: np.ndarray
     kind: str = "numeric"
+
+
+@dataclass
+class TopologyEdit:
+    node_records: List[tuple[NodeDocument, int, NodeRecord]]
+    element_records: List[tuple[ElementDocument, int, ElementRecord]]
 
 
 @dataclass
@@ -1382,11 +1401,92 @@ class LungVizApplication:
             update_selection_structure=kind != "mouse",
         )
 
+    @staticmethod
+    def _remove_topology_records(edit: TopologyEdit) -> None:
+        for document, _index, record in edit.node_records:
+            document.nodes[:] = [item for item in document.nodes if item is not record]
+        for document, _index, record in edit.element_records:
+            document.elements[:] = [
+                item for item in document.elements if item is not record
+            ]
+
+    @staticmethod
+    def _restore_topology_records(edit: TopologyEdit) -> None:
+        for document, index, record in sorted(
+            edit.node_records, key=lambda entry: entry[1]
+        ):
+            if all(item is not record for item in document.nodes):
+                document.nodes.insert(min(index, len(document.nodes)), record)
+        for document, index, record in sorted(
+            edit.element_records, key=lambda entry: entry[1]
+        ):
+            if all(item is not record for item in document.elements):
+                document.elements.insert(min(index, len(document.elements)), record)
+
+    def _delete_selected_nodes(self, region: RegionState) -> None:
+        if (
+            not isinstance(region.scene, (MeshScene, PointScene))
+            or not region.edit_selected
+        ):
+            return
+        count = self._edit_point_count(region)
+        selected = np.asarray(region.edit_selected, dtype=int)
+        selected = selected[(selected >= 0) & (selected < count)]
+        node_ids = {int(value) for value in region.scene.node_ids[selected]}
+        remaining_ids = {
+            int(value) for value in region.scene.node_ids[:count]
+        } - node_ids
+        if not remaining_ids:
+            raise ValueError("At least one node or data point must remain in the region")
+
+        node_records = [
+            (document, index, record)
+            for document in region.edit_documents
+            for index, record in enumerate(document.nodes)
+            if record.identifier in node_ids
+        ]
+        connected_identifiers = {
+            element.identifier
+            for document in region.element_documents
+            for element in document.elements
+            if node_ids.intersection(element.node_ids)
+        }
+        element_records = [
+            (document, index, record)
+            for document in region.element_documents
+            for index, record in enumerate(document.elements)
+            if record.identifier in connected_identifiers
+        ]
+        if not node_records:
+            raise ValueError("The selected nodes could not be found in the loaded EX file")
+
+        edit = TopologyEdit(node_records, element_records)
+        self._remove_topology_records(edit)
+        region.edit_selected = []
+        region.edit_mouse_history = None
+        self._register_region(region)
+        region.edit_undo.append(edit)
+        region.edit_redo.clear()
+        region.message = (
+            f"Deleted {len(node_ids)} node(s) and "
+            f"{len(connected_identifiers)} connected element(s)."
+        )
+
     def _undo_node_edit(self, region: RegionState) -> None:
         if not region.edit_undo:
             return
         region.edit_mouse_history = None
         edit = region.edit_undo.pop()
+        if isinstance(edit, TopologyEdit):
+            self._restore_topology_records(edit)
+            region.edit_selected = []
+            self._register_region(region)
+            region.edit_redo.append(edit)
+            region.message = (
+                f"Restored {len(edit.node_records)} node record(s) and "
+                f"{len(edit.element_records)} element record(s)."
+            )
+            return
         self._set_node_positions(region, edit.indices, edit.before, record=False)
         region.edit_redo.append(edit)
         region.message = f"Undid movement of {len(edit.indices)} node(s)."
@@ -1395,24 +1495,62 @@ class LungVizApplication:
         if not region.edit_redo:
             return
         edit = region.edit_redo.pop()
+        if isinstance(edit, TopologyEdit):
+            self._remove_topology_records(edit)
+            region.edit_selected = []
+            self._register_region(region)
+            region.edit_undo.append(edit)
+            region.message = (
+                f"Deleted {len(edit.node_records)} node record(s) and "
+                f"{len(edit.element_records)} connected element record(s)."
+            )
+            return
         self._set_node_positions(region, edit.indices, edit.after, record=False)
         region.edit_undo.append(edit)
         region.message = f"Redid movement of {len(edit.indices)} node(s)."
 
     def _reset_selected_nodes(self, region: RegionState) -> None:
-        if region.edit_original_coordinates is None or not region.edit_selected:
+        if (
+            region.edit_original_coordinates is None
+            or region.edit_original_node_ids is None
+            or not region.edit_selected
+            or not isinstance(region.scene, (MeshScene, PointScene))
+        ):
             return
         indices = np.asarray(region.edit_selected, dtype=int)
+        originals = {
+            int(node_id): coordinates
+            for node_id, coordinates in zip(
+                region.edit_original_node_ids, region.edit_original_coordinates
+            )
+        }
+        positions = np.asarray(
+            [originals[int(region.scene.node_ids[index])] for index in indices]
+        )
         self._set_node_positions(
-            region, indices, region.edit_original_coordinates[indices], kind="reset"
+            region, indices, positions, kind="reset"
         )
 
     def _reset_all_nodes(self, region: RegionState) -> None:
-        if region.edit_original_coordinates is None:
+        if (
+            region.edit_original_coordinates is None
+            or region.edit_original_node_ids is None
+            or not isinstance(region.scene, (MeshScene, PointScene))
+        ):
             return
-        indices = np.arange(len(region.edit_original_coordinates), dtype=int)
+        count = self._edit_point_count(region)
+        indices = np.arange(count, dtype=int)
+        originals = {
+            int(node_id): coordinates
+            for node_id, coordinates in zip(
+                region.edit_original_node_ids, region.edit_original_coordinates
+            )
+        }
+        positions = np.asarray(
+            [originals[int(node_id)] for node_id in region.scene.node_ids[:count]]
+        )
         self._set_node_positions(
-            region, indices, region.edit_original_coordinates, kind="reset"
+            region, indices, positions, kind="reset"
         )
 
     def export_edited_exnode(
@@ -1438,6 +1576,50 @@ class LungVizApplication:
             return None
         exported = write_exnode_coordinates(document, destination, coordinate_field)
         region.message = f"Exported edited coordinates to {exported.name}."
+        return exported
+
+    def export_edited_ex_files(
+        self, region: RegionState, destination: str | Path | None = None
+    ) -> List[Path]:
+        """Export current node records and matching element records to new EX files."""
+
+        if not isinstance(region.scene, (MeshScene, PointScene)):
+            return []
+        coordinate_field = region.scene.coordinate_field
+        node_documents = [
+            document
+            for document in region.edit_documents
+            if coordinate_field in document.fields
+            and any(coordinate_field in node.fields for node in document.nodes)
+        ]
+        if not node_documents:
+            raise ExFileError("No coordinate EXNODE is available to export")
+        if destination is None:
+            destination = choose_exnode_export_path(node_documents[0].path)
+        if not destination:
+            return []
+
+        primary = Path(destination).expanduser().resolve()
+        exported: List[Path] = []
+        for index, document in enumerate(node_documents):
+            target = primary
+            if index:
+                target = primary.with_name(
+                    f"{primary.stem}_{document.path.stem}{document.path.suffix}"
+                )
+            exported.append(
+                write_exnode_coordinates(document, target, coordinate_field)
+            )
+        for index, document in enumerate(region.element_documents):
+            target = primary.with_suffix(".exelem")
+            if index:
+                target = primary.with_name(
+                    f"{primary.stem}_{document.path.stem}.exelem"
+                )
+            exported.append(write_exelem_records(document, target))
+        region.message = "Exported edited EX files: " + ", ".join(
+            path.name for path in exported
+        )
         return exported
 
     def _consume_node_pick(self, ps, psim) -> None:
@@ -1711,6 +1893,17 @@ class LungVizApplication:
                 preview += ", ..."
             psim.TextWrapped(f"Node IDs: {preview}")
 
+        if psim.Button("Delete selected nodes") and region.edit_selected:
+            try:
+                self._delete_selected_nodes(region)
+            except (ExFileError, ValueError) as exc:
+                region.message = f"Could not delete nodes: {exc}"
+        if isinstance(region.scene, MeshScene):
+            psim.TextWrapped(
+                "Deleting a mesh node also deletes every connected element. "
+                "Undo restores both the nodes and elements."
+            )
+
         changed, translation = psim.InputFloat3(
             "Translation delta", region.edit_translation
         )
@@ -1747,11 +1940,11 @@ class LungVizApplication:
         psim.SameLine()
         if psim.Button("Reset all points"):
             self._reset_all_nodes(region)
-        if psim.Button("Export edited EX file..."):
+        if psim.Button("Export edited EX files..."):
             try:
-                self.export_edited_exnode(region)
+                self.export_edited_ex_files(region)
             except (ExFileError, OSError) as exc:
-                region.message = f"Could not export EX file: {exc}"
+                region.message = f"Could not export EX files: {exc}"
 
     def _draw_region_panel(self, psim) -> None:
         if psim.Button("Load geometry as new region..."):

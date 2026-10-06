@@ -7,8 +7,10 @@ import numpy as np
 from LungViZ.application import (
     LungVizApplication,
     _anatomical_plane_axes,
+    _axis_rotation_matrix,
     _endpoint_cap_positions,
     _log10_colour_values,
+    _plane_mirror_matrix,
     _sample_volume,
     _slice_geometry,
 )
@@ -363,6 +365,144 @@ def test_delete_point_and_reject_deleting_every_point(monkeypatch):
     with np.testing.assert_raises_regex(ValueError, "At least one"):
         app._delete_selected_nodes(region)
     np.testing.assert_array_equal(region.scene.node_ids, [2, 3])
+
+
+def test_rotate_and_mirror_entire_region_with_undo_and_reset(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region(
+        [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
+    )
+    app._set_edit_mode(region, True)
+    original = region.scene.coordinates[: region.scene.original_node_count].copy()
+    region.edit_transform_centre = np.zeros(3)
+
+    app._transform_all_edit_points(
+        region,
+        _axis_rotation_matrix("z", 90.0),
+        kind="90 degree Z rotation",
+    )
+
+    expected_rotation = np.column_stack(
+        (-original[:, 1], original[:, 0], original[:, 2])
+    )
+    np.testing.assert_allclose(
+        region.scene.coordinates[: region.scene.original_node_count],
+        expected_rotation,
+        atol=1e-12,
+    )
+    app._undo_node_edit(region)
+    np.testing.assert_allclose(
+        region.scene.coordinates[: region.scene.original_node_count], original
+    )
+    app._redo_node_edit(region)
+    np.testing.assert_allclose(
+        region.scene.coordinates[: region.scene.original_node_count],
+        expected_rotation,
+        atol=1e-12,
+    )
+    app._reset_all_nodes(region)
+    np.testing.assert_allclose(
+        region.scene.coordinates[: region.scene.original_node_count], original
+    )
+
+    app._transform_all_edit_points(
+        region,
+        _plane_mirror_matrix("yz"),
+        kind="YZ plane mirror",
+    )
+    expected_mirror = original.copy()
+    expected_mirror[:, 0] *= -1
+    np.testing.assert_allclose(
+        region.scene.coordinates[: region.scene.original_node_count], expected_mirror
+    )
+
+
+def test_region_rotation_uses_configured_centre_for_data_points(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region([EXAMPLES / "sample.exdata"])
+    app._set_edit_mode(region, True)
+    original = region.scene.coordinates.copy()
+    region.edit_transform_centre = original[0].copy()
+
+    app._transform_all_edit_points(
+        region,
+        _axis_rotation_matrix("x", 180.0),
+        kind="180 degree X rotation",
+    )
+
+    expected = (original - original[0]) @ _axis_rotation_matrix("x", 180.0).T
+    expected += original[0]
+    np.testing.assert_allclose(region.scene.coordinates, expected, atol=1e-12)
+
+
+def test_rotation_transforms_hermite_derivatives_and_export(monkeypatch, tmp_path):
+    node_path = tmp_path / "curve.exnode"
+    node_path.write_text(
+        """Group name: curve
+#Fields=1
+1) coordinates, coordinate, rectangular cartesian, #Components=3
+ x. Value index=1, #Derivatives=1 (d/ds1)
+ y. Value index=3, #Derivatives=1 (d/ds1)
+ z. Value index=5, #Derivatives=1 (d/ds1)
+Node: 1
+ 0 1 0 1 0 0
+Node: 2
+ 1 1 0 -1 0 0
+""",
+        encoding="utf-8",
+    )
+    element_path = tmp_path / "curve.exelem"
+    element_path.write_text(
+        """Group name: curve
+Shape. Dimension=1 line
+#Scale factor sets=1
+c.Hermite, #Scale factors=2
+#Nodes=2
+#Fields=1
+1) coordinates, coordinate, rectangular cartesian, #Components=3
+ x. c.Hermite, no modify, standard node based.
+   #Nodes=2
+ y. c.Hermite, no modify, standard node based.
+   #Nodes=2
+ z. c.Hermite, no modify, standard node based.
+   #Nodes=2
+Element: 1 0 0
+ Nodes:
+  1 2
+ Scale factors:
+  1.0 1.0
+""",
+        encoding="utf-8",
+    )
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region([node_path, element_path])
+    app._set_edit_mode(region, True)
+    region.edit_transform_centre = np.zeros(3)
+    first_node = region.node_documents[0].nodes[0]
+
+    app._transform_all_edit_points(
+        region,
+        _axis_rotation_matrix("z", 90.0),
+        kind="90 degree Z rotation",
+    )
+
+    np.testing.assert_allclose(
+        first_node.derivatives["coordinates"], [-1.0, 1.0, 0.0], atol=1e-12
+    )
+    app._undo_node_edit(region)
+    np.testing.assert_allclose(first_node.derivatives["coordinates"], [1.0, 1.0, 0.0])
+    app._redo_node_edit(region)
+    exported = app.export_edited_exnode(region, tmp_path / "rotated.exnode")
+    parsed = parse_exnode(exported)
+    np.testing.assert_allclose(
+        parsed.nodes[0].derivatives["coordinates"], [-1.0, 1.0, 0.0], atol=1e-12
+    )
 
 
 def test_standalone_exnode_and_exdata_regions_can_edit_points(monkeypatch):

@@ -19,6 +19,7 @@ Features
 * Render radius fields as variable-radius tubes with an adjustable display scale.
 * Select one or many mesh nodes and move them with the mouse or an exact translation vector.
 * Delete selected nodes together with every connected element.
+* Rotate or mirror every point in a region around a configurable transform centre.
 * Undo, redo, reset, and export edited node and element records to new EX files.
 * Display multi-component fields as Polyscope vectors.
 * Overlay ``.exdata`` locations and their fields as point clouds.
@@ -133,9 +134,13 @@ has a Polyscope translation gizmo for mouse movement. Enter a ``Translation
 delta`` to add the same x, y, z displacement to every selected point; a single
 selected point also exposes its absolute position. Connected mesh segments
 update without changing their connectivity, and cubic Hermite display samples
-are regenerated. Use undo, redo, or reset before choosing **Export edited EX
-file...**. Export preserves the loaded file's headers, identifiers, derivatives,
-and non-coordinate fields and never overwrites the loaded file.
+are regenerated. Set a rotation angle and transform centre to rotate the whole
+region around its global X, Y, or Z axis, or mirror it across the XY, XZ, or YZ
+plane through that centre. Coordinate derivatives rotate with cubic Hermite
+meshes. Every whole-region transform supports undo, redo, and reset. Choose
+**Export edited EX files...** to save the result. Export preserves the loaded
+headers, identifiers, derivatives, and non-coordinate fields and never
+overwrites the loaded files.
 
 For CT data, choose **Load DICOM folder...** or **Load NIfTI...**. DICOM pixel
 values are converted with their rescale slope/intercept, normally yielding

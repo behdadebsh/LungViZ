@@ -235,6 +235,53 @@ def _endpoint_cap_positions(
     return result
 
 
+def _axis_rotation_matrix(axis: str, angle_degrees: float) -> np.ndarray:
+    """Return a right-handed rotation matrix for a global Cartesian axis."""
+
+    angle = np.deg2rad(float(angle_degrees))
+    cosine = float(np.cos(angle))
+    sine = float(np.sin(angle))
+    matrices = {
+        "x": np.asarray(
+            [[1.0, 0.0, 0.0], [0.0, cosine, -sine], [0.0, sine, cosine]]
+        ),
+        "y": np.asarray(
+            [[cosine, 0.0, sine], [0.0, 1.0, 0.0], [-sine, 0.0, cosine]]
+        ),
+        "z": np.asarray(
+            [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]]
+        ),
+    }
+    try:
+        return matrices[axis.lower()]
+    except KeyError as exc:
+        raise ValueError("Rotation axis must be X, Y, or Z") from exc
+
+
+def _plane_mirror_matrix(plane: str) -> np.ndarray:
+    """Return a reflection matrix for a Cartesian plane."""
+
+    matrices = {
+        "xy": np.diag([1.0, 1.0, -1.0]),
+        "xz": np.diag([1.0, -1.0, 1.0]),
+        "yz": np.diag([-1.0, 1.0, 1.0]),
+    }
+    try:
+        return matrices[plane.lower()]
+    except KeyError as exc:
+        raise ValueError("Mirror plane must be XY, XZ, or YZ") from exc
+
+
+def _transform_direction(values: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    """Transform the available components of a coordinate derivative."""
+
+    source = np.asarray(values, dtype=float).reshape(-1)
+    padded = np.zeros(3, dtype=float)
+    padded[: min(3, source.size)] = source[:3]
+    transformed = np.asarray(matrix, dtype=float) @ padded
+    return transformed[: source.size]
+
+
 def _log10_colour_values(values: np.ndarray) -> tuple[np.ndarray, float, int]:
     """Return log10 display values, clamping non-positive entries to the floor."""
 
@@ -385,10 +432,17 @@ class RegionState:
     edit_selection_name: str = ""
     edit_original_coordinates: np.ndarray | None = None
     edit_original_node_ids: np.ndarray | None = None
+    edit_original_derivatives: List[tuple[NodeRecord, str, np.ndarray]] = field(
+        default_factory=list
+    )
     edit_translation: np.ndarray = field(
         default_factory=lambda: np.zeros(3, dtype=float)
     )
     edit_absolute: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float))
+    edit_rotation_degrees: float = 90.0
+    edit_transform_centre: np.ndarray = field(
+        default_factory=lambda: np.zeros(3, dtype=float)
+    )
     edit_undo: List["NodeEdit | TopologyEdit"] = field(default_factory=list)
     edit_redo: List["NodeEdit | TopologyEdit"] = field(default_factory=list)
     edit_gizmo_transform: np.ndarray | None = None
@@ -402,6 +456,15 @@ class NodeEdit:
     before: np.ndarray
     after: np.ndarray
     kind: str = "numeric"
+    derivative_changes: List["DerivativeChange"] = field(default_factory=list)
+
+
+@dataclass
+class DerivativeChange:
+    record: NodeRecord
+    field_name: str
+    before: np.ndarray
+    after: np.ndarray
 
 
 @dataclass
@@ -1253,8 +1316,19 @@ class LungVizApplication:
         ):
             region.edit_original_coordinates = region.scene.coordinates[:count].copy()
             region.edit_original_node_ids = node_ids.copy()
+            coordinate_field = region.scene.coordinate_field
+            region.edit_original_derivatives = [
+                (node, coordinate_field, node.derivatives[coordinate_field].copy())
+                for document in region.edit_documents
+                for node in document.nodes
+                if coordinate_field in node.derivatives
+                and np.all(np.isfinite(node.derivatives[coordinate_field]))
+            ]
             region.edit_undo.clear()
             region.edit_redo.clear()
+        region.edit_transform_centre = np.mean(
+            region.scene.coordinates[:count], axis=0
+        )
         self._create_edit_structures(region)
         region.message = "Point edit mode enabled; click handles to select points."
 
@@ -1347,6 +1421,7 @@ class LungVizApplication:
         record: bool = True,
         kind: str = "numeric",
         update_selection_structure: bool = True,
+        derivative_updates: Sequence[tuple[NodeRecord, str, np.ndarray]] = (),
     ) -> None:
         if not isinstance(region.scene, (MeshScene, PointScene)):
             return
@@ -1357,7 +1432,26 @@ class LungVizApplication:
         if len(new_positions) != len(index_array) or not np.all(np.isfinite(new_positions)):
             raise ValueError("Edited node coordinates must be finite x, y, z values")
         before = region.scene.coordinates[index_array].copy()
-        if np.allclose(before, new_positions):
+        derivative_changes: List[DerivativeChange] = []
+        for node, field_name, target in derivative_updates:
+            current = node.derivatives.get(field_name)
+            target_values = np.asarray(target, dtype=float)
+            if current is None or current.shape != target_values.shape:
+                continue
+            if not np.all(np.isfinite(target_values)):
+                raise ValueError("Edited coordinate derivatives must be finite")
+            if np.allclose(current, target_values):
+                continue
+            derivative_changes.append(
+                DerivativeChange(
+                    node,
+                    field_name,
+                    current.copy(),
+                    target_values.copy(),
+                )
+            )
+            node.derivatives[field_name] = target_values.copy()
+        if np.allclose(before, new_positions) and not derivative_changes:
             return
         self._write_node_positions(region, index_array, new_positions)
         self._refresh_region_after_edit(
@@ -1372,7 +1466,13 @@ class LungVizApplication:
                 else:
                     region.edit_mouse_history = None
             if kind != "mouse" or region.edit_mouse_history is None:
-                edit = NodeEdit(index_array.copy(), before, after.copy(), kind)
+                edit = NodeEdit(
+                    index_array.copy(),
+                    before,
+                    after.copy(),
+                    kind,
+                    derivative_changes,
+                )
                 region.edit_undo.append(edit)
                 if kind == "mouse":
                     region.edit_mouse_history = edit
@@ -1382,6 +1482,46 @@ class LungVizApplication:
                 region.edit_selected[0]
             ].copy()
         region.message = f"Moved {len(index_array)} point(s)."
+
+    def _transform_all_edit_points(
+        self,
+        region: RegionState,
+        matrix: np.ndarray,
+        *,
+        kind: str,
+    ) -> None:
+        if not isinstance(region.scene, (MeshScene, PointScene)):
+            return
+        transform = np.asarray(matrix, dtype=float)
+        centre = np.asarray(region.edit_transform_centre, dtype=float)
+        if transform.shape != (3, 3) or not np.all(np.isfinite(transform)):
+            raise ValueError("The point transform must be a finite 3 x 3 matrix")
+        if centre.shape != (3,) or not np.all(np.isfinite(centre)):
+            raise ValueError("The transform centre must contain finite x, y, z values")
+        count = self._edit_point_count(region)
+        indices = np.arange(count, dtype=int)
+        coordinates = region.scene.coordinates[:count]
+        transformed = (coordinates - centre) @ transform.T + centre
+        coordinate_field = region.scene.coordinate_field
+        derivative_updates = [
+            (
+                node,
+                coordinate_field,
+                _transform_direction(node.derivatives[coordinate_field], transform),
+            )
+            for document in region.edit_documents
+            for node in document.nodes
+            if coordinate_field in node.derivatives
+            and np.all(np.isfinite(node.derivatives[coordinate_field]))
+        ]
+        self._set_node_positions(
+            region,
+            indices,
+            transformed,
+            kind=kind,
+            derivative_updates=derivative_updates,
+        )
+        region.message = f"Applied {kind} to {count} point(s)."
 
     def _translate_selected_nodes(
         self, region: RegionState, translation: np.ndarray, *, kind: str = "numeric"
@@ -1487,7 +1627,16 @@ class LungVizApplication:
                 f"{len(edit.element_records)} element record(s)."
             )
             return
-        self._set_node_positions(region, edit.indices, edit.before, record=False)
+        self._set_node_positions(
+            region,
+            edit.indices,
+            edit.before,
+            record=False,
+            derivative_updates=[
+                (change.record, change.field_name, change.before)
+                for change in edit.derivative_changes
+            ],
+        )
         region.edit_redo.append(edit)
         region.message = f"Undid movement of {len(edit.indices)} node(s)."
 
@@ -1505,7 +1654,16 @@ class LungVizApplication:
                 f"{len(edit.element_records)} connected element record(s)."
             )
             return
-        self._set_node_positions(region, edit.indices, edit.after, record=False)
+        self._set_node_positions(
+            region,
+            edit.indices,
+            edit.after,
+            record=False,
+            derivative_updates=[
+                (change.record, change.field_name, change.after)
+                for change in edit.derivative_changes
+            ],
+        )
         region.edit_undo.append(edit)
         region.message = f"Redid movement of {len(edit.indices)} node(s)."
 
@@ -1527,8 +1685,23 @@ class LungVizApplication:
         positions = np.asarray(
             [originals[int(region.scene.node_ids[index])] for index in indices]
         )
+        selected_ids = {int(region.scene.node_ids[index]) for index in indices}
+        original_derivatives = {
+            id(node): (node, field_name, values)
+            for node, field_name, values in region.edit_original_derivatives
+        }
+        derivative_updates = [
+            original_derivatives[id(node)]
+            for document in region.edit_documents
+            for node in document.nodes
+            if node.identifier in selected_ids and id(node) in original_derivatives
+        ]
         self._set_node_positions(
-            region, indices, positions, kind="reset"
+            region,
+            indices,
+            positions,
+            kind="reset",
+            derivative_updates=derivative_updates,
         )
 
     def _reset_all_nodes(self, region: RegionState) -> None:
@@ -1549,8 +1722,22 @@ class LungVizApplication:
         positions = np.asarray(
             [originals[int(node_id)] for node_id in region.scene.node_ids[:count]]
         )
+        current_record_ids = {
+            id(node)
+            for document in region.edit_documents
+            for node in document.nodes
+        }
+        derivative_updates = [
+            (node, field_name, values)
+            for node, field_name, values in region.edit_original_derivatives
+            if id(node) in current_record_ids
+        ]
         self._set_node_positions(
-            region, indices, positions, kind="reset"
+            region,
+            indices,
+            positions,
+            kind="reset",
+            derivative_updates=derivative_updates,
         )
 
     def export_edited_exnode(
@@ -1929,6 +2116,51 @@ class LungVizApplication:
                     )
                 except (ExFileError, ValueError) as exc:
                     region.message = f"Could not move node: {exc}"
+
+        psim.TextUnformatted("Rotate / mirror entire region")
+        changed, angle = psim.InputFloat(
+            "Rotation angle (degrees)", region.edit_rotation_degrees
+        )
+        if changed:
+            region.edit_rotation_degrees = float(angle)
+        changed, centre = psim.InputFloat3(
+            "Transform centre", region.edit_transform_centre
+        )
+        if changed:
+            region.edit_transform_centre = np.asarray(centre, dtype=float)
+        if psim.Button("Use region centroid"):
+            count = self._edit_point_count(region)
+            region.edit_transform_centre = np.mean(
+                region.scene.coordinates[:count], axis=0
+            )
+        psim.TextWrapped(
+            "Rotations use the global X, Y, or Z axis through the transform centre. "
+            "Mirrors use the corresponding XY, XZ, or YZ plane through that centre."
+        )
+        for axis in ("X", "Y", "Z"):
+            if psim.Button(f"Rotate {axis}"):
+                try:
+                    self._transform_all_edit_points(
+                        region,
+                        _axis_rotation_matrix(axis, region.edit_rotation_degrees),
+                        kind=f"{region.edit_rotation_degrees:g} degree {axis} rotation",
+                    )
+                except (ExFileError, ValueError) as exc:
+                    region.message = f"Could not rotate region: {exc}"
+            if axis != "Z":
+                psim.SameLine()
+        for plane in ("XY", "XZ", "YZ"):
+            if psim.Button(f"Mirror {plane}"):
+                try:
+                    self._transform_all_edit_points(
+                        region,
+                        _plane_mirror_matrix(plane),
+                        kind=f"{plane} plane mirror",
+                    )
+                except (ExFileError, ValueError) as exc:
+                    region.message = f"Could not mirror region: {exc}"
+            if plane != "YZ":
+                psim.SameLine()
 
         if psim.Button("Undo point edit"):
             self._undo_node_edit(region)

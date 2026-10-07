@@ -14,6 +14,7 @@ Features
 * Load each EX mesh or node set into an isolated region with its own identifier namespace.
 * Add files to an existing region when its exnode and exelem files are selected separately.
 * Inspect original node and element identifiers and 1D connectivity.
+* Toggle on-screen node and element identifiers using the numbers stored in EX files.
 * Read grid-based ``Values:`` blocks as fields associated with mesh elements.
 * Colour a network by any nodal or element scalar field, vector component, or magnitude.
 * Render radius fields as variable-radius tubes with an adjustable display scale.
@@ -121,6 +122,13 @@ centre inward by its displayed radius. The rounded cap therefore ends at the
 original node coordinate instead of protruding around it as a large sphere.
 This display-only adjustment is applied with smoothing on or off; it does not
 alter the coordinates used for editing or EX export.
+
+Enable **Show node identifiers** or **Show element identifiers** to place the
+actual identifiers from the EX files beside the visible tree. These labels are
+not zero-based Polyscope indices. Each element is labelled once even when a
+cubic Hermite element is rendered as several display segments. The **Number
+label spacing** control reduces overlap in dense branches by retaining the
+nearest label in each screen-space area.
 
 Use Polyscope's single **Screenshot** button to choose an explicit PNG or JPEG
 filename and folder; ``Ctrl+Shift+S`` opens the same Save As workflow. The

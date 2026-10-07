@@ -73,6 +73,19 @@ def nearest_existing_directory(path: Path) -> Path:
     return Path.cwd().resolve()
 
 
+def preferred_browser_size(display_size: Sequence[float]) -> Tuple[float, float]:
+    """Choose a spacious modal size which still fits a modest display."""
+
+    width = float(display_size[0]) if len(display_size) > 0 else 1024.0
+    height = float(display_size[1]) if len(display_size) > 1 else 768.0
+    desired_width = min(900.0, max(560.0, width - 120.0))
+    desired_height = min(700.0, max(460.0, height - 120.0))
+    return (
+        min(desired_width, max(280.0, width - 40.0)),
+        min(desired_height, max(240.0, height - 40.0)),
+    )
+
+
 class FileBrowser:
     """Stateful, non-blocking file browser drawn in the Polyscope callback."""
 
@@ -244,6 +257,13 @@ class FileBrowser:
         if self._open_popup:
             psim.OpenPopup(self.popup_name)
             self._open_popup = False
+        try:
+            display_size = psim.GetIO().DisplaySize
+        except (AttributeError, RuntimeError):
+            display_size = (1024.0, 768.0)
+        psim.SetNextWindowSize(
+            preferred_browser_size(display_size), psim.ImGuiCond_Appearing
+        )
         if not psim.BeginPopupModal(self.popup_name):
             return None
 
@@ -269,8 +289,11 @@ class FileBrowser:
                 if changed:
                     self.navigate(roots[root_index])
 
+            psim.TextUnformatted("Location")
+            available_width = psim.GetContentRegionAvail()[0]
+            psim.SetNextItemWidth(max(140.0, available_width - 90.0))
             changed, self.path_input = psim.InputTextWithHint(
-                "Location", "Enter or paste a folder path", self.path_input
+                "##Location", "Enter or paste a folder or file path", self.path_input
             )
             if changed:
                 self._overwrite_candidate = None
@@ -282,8 +305,10 @@ class FileBrowser:
                 self.navigate(self.directory.parent)
 
             if request.filters:
+                psim.TextUnformatted("File type")
+                psim.SetNextItemWidth(max(160.0, psim.GetContentRegionAvail()[0]))
                 changed, index = psim.Combo(
-                    "File type",
+                    "##File type",
                     self.filter_index,
                     [item.label for item in request.filters],
                 )
@@ -303,9 +328,17 @@ class FileBrowser:
                 self.show_hidden = show_hidden
                 self._refresh()
 
+            footer_height = (
+                115.0
+                if request.mode in {"save_file", "open_file", "open_files"}
+                else 85.0
+            )
+            list_height = max(
+                160.0, psim.GetContentRegionAvail()[1] - footer_height
+            )
             psim.BeginChild(
                 "LungViZ file list",
-                (0.0, 300.0),
+                (0.0, list_height),
                 psim.ImGuiChildFlags_Borders,
             )
             try:
@@ -322,8 +355,10 @@ class FileBrowser:
                 psim.EndChild()
 
             if request.mode == "save_file":
+                psim.TextUnformatted("Filename")
+                psim.SetNextItemWidth(max(160.0, psim.GetContentRegionAvail()[0]))
                 changed, self.filename_input = psim.InputTextWithHint(
-                    "Filename", "Enter a filename", self.filename_input
+                    "##Filename", "Enter a filename", self.filename_input
                 )
                 if changed:
                     self._overwrite_candidate = None
@@ -333,6 +368,11 @@ class FileBrowser:
             else:
                 count = len(self.selected)
                 psim.TextUnformatted(f"Selected file{'s' if count != 1 else ''}: {count}")
+                if self.selected:
+                    names = ", ".join(path.name for path in self.selected[:3])
+                    if count > 3:
+                        names += f", and {count - 3} more"
+                    psim.TextWrapped(names)
 
             if self.error:
                 psim.TextWrapped(self.error)

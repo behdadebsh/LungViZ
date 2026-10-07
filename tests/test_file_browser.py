@@ -1,7 +1,48 @@
-from LungViZ.file_browser import FileBrowser, FileDialogRequest, FileFilter
+from types import SimpleNamespace
+
+from LungViZ.file_browser import (
+    FileBrowser,
+    FileDialogRequest,
+    FileFilter,
+    preferred_browser_size,
+)
 
 
 GEOMETRY = FileFilter("Geometry", ("*.exnode", "*.exelem"))
+
+
+def test_browser_popup_is_large_but_respects_available_display_space():
+    assert preferred_browser_size((1920.0, 1080.0)) == (900.0, 700.0)
+    assert preferred_browser_size((800.0, 600.0)) == (680.0, 480.0)
+    assert preferred_browser_size((500.0, 400.0)) == (460.0, 360.0)
+
+
+def test_browser_applies_preferred_size_when_popup_appears(tmp_path):
+    browser = FileBrowser()
+    browser.open(FileDialogRequest("Open", "open_file", tmp_path))
+
+    class FakeImGui:
+        ImGuiCond_Appearing = 8
+
+        def OpenPopup(self, name):
+            self.opened = name
+
+        def GetIO(self):
+            return SimpleNamespace(DisplaySize=(1280.0, 800.0))
+
+        def SetNextWindowSize(self, size, condition):
+            self.window_size = size
+            self.condition = condition
+
+        def BeginPopupModal(self, name):
+            return False
+
+    psim = FakeImGui()
+
+    assert browser.draw(psim) is None
+    assert psim.opened == browser.popup_name
+    assert psim.window_size == (900.0, 680.0)
+    assert psim.condition == psim.ImGuiCond_Appearing
 
 
 def test_open_files_filters_entries_and_supports_multiple_selection(tmp_path):

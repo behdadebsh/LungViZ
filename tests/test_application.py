@@ -733,10 +733,8 @@ def test_named_screenshot_uses_selected_path_and_background(monkeypatch, tmp_pat
     assert fake.saved_screenshot == (str(jpg_destination.resolve()), False, False)
 
 
-def test_named_screenshot_shortcut_uses_save_dialog(monkeypatch):
+def test_named_screenshot_shortcut_uses_save_dialog():
     app = LungVizApplication()
-    saved = []
-    monkeypatch.setattr(app, "save_screenshot", lambda: saved.append(True))
     psim = SimpleNamespace(
         ImGuiKey_S=83,
         GetIO=lambda: SimpleNamespace(KeyCtrl=True, KeyShift=True),
@@ -745,7 +743,9 @@ def test_named_screenshot_shortcut_uses_save_dialog(monkeypatch):
 
     app._consume_screenshot_shortcut(psim)
 
-    assert saved == [True]
+    assert app.file_browser.active
+    assert app.file_browser.request.mode == "save_file"
+    assert app._pending_file_action.kind == "screenshot"
 
 
 def test_log_colour_values_clamp_non_positive_entries_to_positive_floor():
@@ -788,11 +788,12 @@ def test_native_screenshot_button_opens_save_as_and_moves_capture(
     native_capture = tmp_path / "screenshot_000000.png"
     native_capture.write_bytes(b"native screenshot")
     destination = tmp_path / "named-airway.png"
-    monkeypatch.setattr(
-        "LungViZ.application.choose_screenshot_path", lambda extension: str(destination)
-    )
 
     app._consume_native_screenshot()
+    action = app._pending_file_action
+    assert app.file_browser.active
+    assert action.source == native_capture.resolve()
+    app._complete_file_action(action, [destination])
 
     assert destination.read_bytes() == b"native screenshot"
     assert not native_capture.exists()
@@ -805,11 +806,11 @@ def test_cancelled_native_screenshot_keeps_numbered_capture(monkeypatch, tmp_pat
     app._native_screenshot_snapshot = app._native_screenshot_files()
     native_capture = tmp_path / "screenshot_000000.jpg"
     native_capture.write_bytes(b"native screenshot")
-    monkeypatch.setattr(
-        "LungViZ.application.choose_screenshot_path", lambda extension: ""
-    )
 
     app._consume_native_screenshot()
+    action = app._pending_file_action
+    outcome = app.file_browser.cancel()
+    app._complete_file_action(action, outcome.paths)
 
     assert native_capture.exists()
     assert "kept at" in app.message

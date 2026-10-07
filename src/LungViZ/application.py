@@ -17,6 +17,7 @@ from .exfile import (
     write_exelem_records,
     write_exnode_coordinates,
 )
+from .file_browser import FileBrowser, FileDialogRequest, FileFilter
 from .model import (
     ElementDocument,
     ElementRecord,
@@ -37,110 +38,23 @@ from .surface import SURFACE_EXTENSIONS, load_surface_scene
 from .volume import CTVolume, load_dicom_directory, load_nifti
 
 
-def choose_ex_files() -> Sequence[str]:
-    """Choose EX or triangulated-surface files for a new region."""
-
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        return filedialog.askopenfilenames(
-            title="Load EX or surface geometry",
-            filetypes=[
-                ("Supported geometry", "*.exnode *.exelem *.exdata *.stl *.ply"),
-                ("OpenCMISS EX files", "*.exnode *.exelem *.exdata"),
-                ("Triangulated surfaces", "*.stl *.ply"),
-                ("All files", "*.*"),
-            ],
-        )
-    finally:
-        root.destroy()
-
-
-def choose_dicom_directory() -> str:
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        return filedialog.askdirectory(title="Choose a DICOM series folder")
-    finally:
-        root.destroy()
-
-
-def choose_nifti_file() -> str:
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        return filedialog.askopenfilename(
-            title="Choose a NIfTI CT volume",
-            filetypes=[("NIfTI images", "*.nii *.nii.gz"), ("All files", "*.*")],
-        )
-    finally:
-        root.destroy()
-
-
-def choose_exnode_export_path(source: Path) -> str:
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    extension = (
-        source.suffix.lower() if source.suffix.lower() == ".exdata" else ".exnode"
-    )
-    file_label = (
-        "OpenCMISS EX data files"
-        if extension == ".exdata"
-        else "OpenCMISS EX node files"
-    )
-    try:
-        return filedialog.asksaveasfilename(
-            title="Export edited node coordinates",
-            initialdir=str(source.parent),
-            initialfile=f"{source.stem}_edited{extension}",
-            defaultextension=extension,
-            filetypes=[(file_label, f"*{extension}"), ("All files", "*.*")],
-        )
-    finally:
-        root.destroy()
-
-
-def choose_screenshot_path(default_extension: str = ".png") -> str:
-    """Choose a named PNG or JPEG destination for the current view."""
-
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    default_extension = default_extension.lower()
-    if default_extension not in {".png", ".jpg"}:
-        default_extension = ".png"
-    try:
-        return filedialog.asksaveasfilename(
-            title="Save LungViZ screenshot",
-            initialdir=str(Path.cwd()),
-            initialfile=f"lungviz_view{default_extension}",
-            defaultextension=default_extension,
-            filetypes=[
-                ("PNG image", "*.png"),
-                ("JPEG image", "*.jpg"),
-            ],
-        )
-    finally:
-        root.destroy()
+GEOMETRY_FILTERS = (
+    FileFilter(
+        "Supported geometry",
+        ("*.exnode", "*.exelem", "*.exdata", "*.stl", "*.ply"),
+    ),
+    FileFilter("OpenCMISS EX files", ("*.exnode", "*.exelem", "*.exdata")),
+    FileFilter("Triangulated surfaces", ("*.stl", "*.ply")),
+    FileFilter("All files", ("*",)),
+)
+NIFTI_FILTERS = (
+    FileFilter("NIfTI images", ("*.nii", "*.nii.gz")),
+    FileFilter("All files", ("*",)),
+)
+SCREENSHOT_FILTERS = (
+    FileFilter("PNG image", ("*.png",)),
+    FileFilter("JPEG image", ("*.jpg",)),
+)
 
 
 def _finite_for_display(values: np.ndarray) -> np.ndarray:
@@ -601,6 +515,13 @@ class CTSliceState:
     transform_gizmo: bool = False
 
 
+@dataclass(frozen=True)
+class PendingFileAction:
+    kind: str
+    region_key: int | None = None
+    source: Path | None = None
+
+
 class LungVizApplication:
     def __init__(self) -> None:
         self.regions: List[RegionState] = []
@@ -613,6 +534,8 @@ class LungVizApplication:
         self._node_pick_control = False
         self.screenshot_transparent_background = False
         self._native_screenshot_snapshot: Dict[Path, tuple[int, int]] | None = None
+        self.file_browser = FileBrowser()
+        self._pending_file_action: PendingFileAction | None = None
         self.message = "Load each mesh or standalone node set as its own region."
 
     @property
@@ -747,6 +670,11 @@ class LungVizApplication:
         if region is None:
             self.load_region(paths)
             return
+        self.add_to_region(region, paths)
+
+    def add_to_region(
+        self, region: RegionState, paths: Sequence[str | Path]
+    ) -> None:
         errors = self._parse_paths(region, paths)
         self._register_region(region)
         if errors:
@@ -1194,14 +1122,159 @@ class LungVizApplication:
         region.surface_opacity = float(np.clip(opacity, 0.0, 1.0))
         region.field_structure.set_transparency(region.surface_opacity)
 
+    def _open_file_browser(
+        self, request: FileDialogRequest, action: PendingFileAction
+    ) -> bool:
+        if not self.file_browser.open(request):
+            self.message = "Finish or cancel the open file-browser operation first."
+            return False
+        self._pending_file_action = action
+        return True
+
+    def _request_geometry_files(self, region: RegionState | None = None) -> None:
+        initial_directory = (
+            region.paths[0].parent if region is not None and region.paths else Path.cwd()
+        )
+        action = PendingFileAction(
+            "add_geometry" if region is not None else "load_geometry",
+            region_key=region.key if region is not None else None,
+        )
+        self._open_file_browser(
+            FileDialogRequest(
+                title=(
+                    f"Add files to {region.name}"
+                    if region is not None
+                    else "Load geometry as a new region"
+                ),
+                mode="open_files",
+                initial_directory=initial_directory,
+                filters=GEOMETRY_FILTERS,
+            ),
+            action,
+        )
+
+    def _request_dicom_directory(self) -> None:
+        self._open_file_browser(
+            FileDialogRequest(
+                title="Choose a DICOM series folder",
+                mode="select_directory",
+                initial_directory=self.file_browser.directory,
+            ),
+            PendingFileAction("load_dicom"),
+        )
+
+    def _request_nifti_file(self) -> None:
+        self._open_file_browser(
+            FileDialogRequest(
+                title="Choose a NIfTI CT volume",
+                mode="open_file",
+                initial_directory=self.file_browser.directory,
+                filters=NIFTI_FILTERS,
+            ),
+            PendingFileAction("load_nifti"),
+        )
+
+    def _request_export_path(
+        self, region: RegionState, source: Path, action_kind: str = "export_ex"
+    ) -> None:
+        extension = (
+            source.suffix.lower()
+            if source.suffix.lower() == ".exdata"
+            else ".exnode"
+        )
+        label = (
+            "OpenCMISS EX data files"
+            if extension == ".exdata"
+            else "OpenCMISS EX node files"
+        )
+        self._open_file_browser(
+            FileDialogRequest(
+                title="Export edited EX files",
+                mode="save_file",
+                initial_directory=source.parent,
+                filters=(FileFilter(label, (f"*{extension}",)),),
+                default_name=f"{source.stem}_edited{extension}",
+            ),
+            PendingFileAction(action_kind, region_key=region.key),
+        )
+
+    def _request_screenshot_path(
+        self, default_extension: str = ".png", source: Path | None = None
+    ) -> bool:
+        extension = default_extension.lower()
+        if extension not in {".png", ".jpg"}:
+            extension = ".png"
+        filters = SCREENSHOT_FILTERS
+        if extension == ".jpg":
+            filters = (SCREENSHOT_FILTERS[1], SCREENSHOT_FILTERS[0])
+        return self._open_file_browser(
+            FileDialogRequest(
+                title="Save LungViZ screenshot",
+                mode="save_file",
+                initial_directory=source.parent if source is not None else Path.cwd(),
+                filters=filters,
+                default_name=f"lungviz_view{extension}",
+            ),
+            PendingFileAction(
+                "native_screenshot" if source else "screenshot", source=source
+            ),
+        )
+
+    def _region_with_key(self, key: int | None) -> RegionState | None:
+        return next((region for region in self.regions if region.key == key), None)
+
+    def _complete_file_action(
+        self, action: PendingFileAction, paths: Sequence[Path]
+    ) -> None:
+        if not paths:
+            if action.kind == "native_screenshot" and action.source is not None:
+                self.message = f"Screenshot kept at {action.source}."
+            return
+        try:
+            if action.kind == "load_geometry":
+                self.load_files_as_regions(paths)
+            elif action.kind == "add_geometry":
+                region = self._region_with_key(action.region_key)
+                if region is None:
+                    raise ValueError("The target region is no longer available")
+                self.add_to_region(region, paths)
+            elif action.kind == "load_dicom":
+                self.load_ct(load_dicom_directory(paths[0]))
+            elif action.kind == "load_nifti":
+                self.load_ct(load_nifti(paths[0]))
+            elif action.kind == "export_ex":
+                region = self._region_with_key(action.region_key)
+                if region is None:
+                    raise ValueError("The target region is no longer available")
+                self.export_edited_ex_files(region, paths[0])
+            elif action.kind == "export_exnode":
+                region = self._region_with_key(action.region_key)
+                if region is None:
+                    raise ValueError("The target region is no longer available")
+                self.export_edited_exnode(region, paths[0])
+            elif action.kind == "screenshot":
+                self.save_screenshot(paths[0])
+            elif action.kind == "native_screenshot" and action.source is not None:
+                self._save_native_screenshot(action.source, paths[0])
+        except Exception as exc:
+            self.message = f"Could not complete {action.kind.replace('_', ' ')}: {exc}"
+
+    def _draw_file_browser(self, psim) -> None:
+        outcome = self.file_browser.draw(psim)
+        if outcome is None:
+            return
+        action = self._pending_file_action
+        self._pending_file_action = None
+        if action is not None:
+            self._complete_file_action(action, outcome.paths)
+
     def save_screenshot(self, destination: str | Path | None = None) -> Path | None:
         """Save the current rendered view to a user-selected image path."""
 
         import polyscope as ps
 
         if destination is None:
-            destination = choose_screenshot_path()
-        if not destination:
+            self._request_screenshot_path()
             return None
         target = Path(destination).expanduser().resolve()
         if not target.suffix:
@@ -1254,11 +1327,15 @@ class LungVizApplication:
             return
 
         source = max(changed, key=lambda path: current[path][0])
+        if not self._request_screenshot_path(source.suffix, source):
+            self.message = (
+                f"Screenshot kept at {source}; finish the open file operation first."
+            )
+
+    def _save_native_screenshot(self, source: Path, destination: str | Path) -> None:
+        """Move or re-render a numbered Polyscope capture at its chosen path."""
+
         try:
-            destination = choose_screenshot_path(source.suffix)
-            if not destination:
-                self.message = f"Screenshot kept at {source}."
-                return
             target = Path(destination).expanduser().resolve()
             if not target.suffix:
                 target = target.with_suffix(source.suffix)
@@ -1288,10 +1365,7 @@ class LungVizApplication:
             and psim.IsKeyPressed(psim.ImGuiKey_S, False)
         ):
             return
-        try:
-            self.save_screenshot()
-        except (OSError, RuntimeError, ValueError) as exc:
-            self.message = f"Could not save screenshot: {exc}"
+        self._request_screenshot_path()
 
     def _remove_edit_selection_structure(self, region: RegionState) -> None:
         gizmo = region.edit_gizmo
@@ -1874,8 +1948,7 @@ class LungVizApplication:
         if document is None:
             raise ExFileError("No coordinate EXNODE is available to export")
         if destination is None:
-            destination = choose_exnode_export_path(document.path)
-        if not destination:
+            self._request_export_path(region, document.path, "export_exnode")
             return None
         exported = write_exnode_coordinates(document, destination, coordinate_field)
         region.message = f"Exported edited coordinates to {exported.name}."
@@ -1898,8 +1971,7 @@ class LungVizApplication:
         if not node_documents:
             raise ExFileError("No coordinate EXNODE is available to export")
         if destination is None:
-            destination = choose_exnode_export_path(node_documents[0].path)
-        if not destination:
+            self._request_export_path(region, node_documents[0].path)
             return []
 
         primary = Path(destination).expanduser().resolve()
@@ -2289,19 +2361,11 @@ class LungVizApplication:
         if psim.Button("Reset all points"):
             self._reset_all_nodes(region)
         if psim.Button("Export edited EX files..."):
-            try:
-                self.export_edited_ex_files(region)
-            except (ExFileError, OSError) as exc:
-                region.message = f"Could not export EX files: {exc}"
+            self.export_edited_ex_files(region)
 
     def _draw_region_panel(self, psim) -> None:
         if psim.Button("Load geometry as new region..."):
-            try:
-                selected = choose_ex_files()
-                if selected:
-                    self.load_files_as_regions(selected)
-            except Exception as exc:
-                self.message = f"Could not load geometry region: {exc}"
+            self._request_geometry_files()
 
         region = self.selected_region
         if self.regions:
@@ -2314,12 +2378,7 @@ class LungVizApplication:
                 self.selected_region_index = value
                 region = self.selected_region
             if psim.Button("Add files to region..."):
-                try:
-                    selected = choose_ex_files()
-                    if selected:
-                        self.add_to_selected_region(selected)
-                except Exception as exc:
-                    self.message = f"Could not add files: {exc}"
+                self._request_geometry_files(region)
             psim.SameLine()
             if psim.Button("Remove region"):
                 self.remove_selected_region()
@@ -2546,20 +2605,10 @@ class LungVizApplication:
 
     def _draw_ct_panel(self, psim) -> None:
         if psim.Button("Load DICOM folder..."):
-            try:
-                selected = choose_dicom_directory()
-                if selected:
-                    self.load_ct(load_dicom_directory(selected))
-            except Exception as exc:
-                self.message = f"Could not load DICOM: {exc}"
+            self._request_dicom_directory()
         psim.SameLine()
         if psim.Button("Load NIfTI..."):
-            try:
-                selected = choose_nifti_file()
-                if selected:
-                    self.load_ct(load_nifti(selected))
-            except Exception as exc:
-                self.message = f"Could not load NIfTI: {exc}"
+            self._request_nifti_file()
 
         if self.ct_volume is not None:
             volume = self.ct_volume
@@ -2737,6 +2786,7 @@ class LungVizApplication:
             "visibility, and per-structure options. Press Ctrl+Shift+S for a named "
             "screenshot in a chosen folder."
         )
+        self._draw_file_browser(psim)
 
     def run(self, initial_paths: Sequence[str | Path] = ()) -> None:
         import polyscope as ps

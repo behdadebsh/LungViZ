@@ -27,6 +27,7 @@ Features
 * Display standalone ``.exnode`` regions as independent point clouds.
 * Load STL and PLY triangle surfaces with independent adjustable opacity.
 * Drop supported geometry files directly into the Polyscope window.
+* Browse for files, folders, exports, and screenshots inside LungViZ without Tkinter.
 * Load a DICOM series folder or NIfTI CT volume using patient/world coordinates.
 * Inspect CT intensity on grayscale axial, coronal, and sagittal planes without drawing a solid volume.
 * Show, hide, slide, translate, or rotate each CT plane independently, or unload the CT.
@@ -57,6 +58,10 @@ Then install and run::
    python -m pip install -e .
    lungviz
 
+LungViZ does not require Tkinter or another desktop GUI toolkit. Its file
+browser is rendered inside the existing Polyscope window, so the loading and
+saving controls use the same interface on Windows, macOS, and Linux.
+
 You can preload files from the command line::
 
    lungviz model.exnode model.exelem measurements.exdata
@@ -67,6 +72,30 @@ Or try the included small branching airway example::
 
 Usage notes
 -----------
+
+File browser
+^^^^^^^^^^^^
+
+All **Load**, **Add files**, **Export**, and **Save As** actions open LungViZ's
+file browser inside the Polyscope window. Select a folder in the list to enter
+it, use **Up** to visit its parent, or paste a folder or complete file path into
+**Location** and press **Go**. A drive selector is shown on Windows when more
+than one drive is available. **File type** filters the visible files, and
+**Show hidden files** includes names beginning with a dot.
+
+Geometry loading permits multiple selections: select each related ``.exnode``,
+``.exelem``, and ``.exdata`` file, then choose **Open files**. Selecting an item
+again removes it from the selection. NIfTI loading accepts one file. For DICOM,
+navigate into the directory containing the series and choose **Select folder**.
+Geometry can still be dragged directly onto the Polyscope window or supplied on
+the command line.
+
+Export and screenshot operations provide a **Filename** field. LungViZ adds the
+default extension when it is omitted. If the destination already exists, the
+browser asks for confirmation; press **Save** again to replace it. **Cancel**
+leaves the current scene and loaded data unchanged. Cancelling the Save As step
+after using Polyscope's Screenshot button retains its automatically numbered
+capture in the current working directory.
 
 Click **Load geometry as new region...** and select the files belonging to one mesh.
 Every new-region operation creates a separate node-number namespace, so another
@@ -130,10 +159,10 @@ cubic Hermite element is rendered as several display segments. The **Number
 label spacing** control reduces overlap in dense branches by retaining the
 nearest label in each screen-space area.
 
-Use Polyscope's single **Screenshot** button to choose an explicit PNG or JPEG
-filename and folder; ``Ctrl+Shift+S`` opens the same Save As workflow. The
-button's adjacent menu still controls its file format and transparent-background
-setting. Captures exclude the interface panels.
+Use Polyscope's single **Screenshot** button to open LungViZ's in-window Save As
+browser for an explicit PNG or JPEG filename and folder; ``Ctrl+Shift+S`` opens
+the same workflow. The button's adjacent menu still controls its file format
+and transparent-background setting. Captures exclude the interface panels.
 
 Enable **Edit nodes / data points** to display pickable handles for a 1D mesh,
 standalone EXNODE region, or EXDATA-only region. Click to replace the selection,

@@ -282,6 +282,119 @@ def _transform_direction(values: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return transformed[: source.size]
 
 
+def _node_label_data(scene: MeshScene | PointScene) -> tuple[np.ndarray, np.ndarray]:
+    """Return true EX node identifiers and their original-node positions."""
+
+    count = (
+        scene.original_node_count
+        if isinstance(scene, MeshScene)
+        else len(scene.node_ids)
+    )
+    identifiers = np.asarray(scene.node_ids[:count], dtype=int)
+    positions = np.asarray(scene.coordinates[:count], dtype=float)
+    valid = identifiers != 0
+    return positions[valid], identifiers[valid]
+
+
+def _element_label_data(scene: MeshScene) -> tuple[np.ndarray, np.ndarray]:
+    """Return one centreline anchor for each true EX element identifier."""
+
+    element_ids = np.asarray(scene.edge_element_ids, dtype=int)
+    identifiers = []
+    positions = []
+    for identifier in dict.fromkeys(int(value) for value in element_ids if value):
+        edge_indices = np.flatnonzero(element_ids == identifier)
+        middle_edge = scene.edges[edge_indices[len(edge_indices) // 2]]
+        positions.append(np.mean(scene.coordinates[middle_edge], axis=0))
+        identifiers.append(identifier)
+    if not positions:
+        return np.empty((0, 3), dtype=float), np.empty(0, dtype=int)
+    return np.asarray(positions, dtype=float), np.asarray(identifiers, dtype=int)
+
+
+def _transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    """Apply a homogeneous region transform to 3D points."""
+
+    values = np.asarray(points, dtype=float)
+    matrix = np.asarray(transform, dtype=float)
+    homogeneous = np.column_stack((values, np.ones(len(values), dtype=float)))
+    return (homogeneous @ matrix.T)[:, :3]
+
+
+def _project_world_points(
+    points: np.ndarray,
+    *,
+    camera_position: np.ndarray,
+    look_direction: np.ndarray,
+    up_direction: np.ndarray,
+    right_direction: np.ndarray,
+    vertical_fov_degrees: float,
+    aspect: float,
+    screen_size: tuple[float, float],
+    projection_mode: str,
+    view_center: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project world points to ImGui screen coordinates and return visibility."""
+
+    values = np.asarray(points, dtype=float)
+    width, height = (float(screen_size[0]), float(screen_size[1]))
+    look = np.asarray(look_direction, dtype=float)
+    up = np.asarray(up_direction, dtype=float)
+    right = np.asarray(right_direction, dtype=float)
+    look /= np.linalg.norm(look)
+    up /= np.linalg.norm(up)
+    right /= np.linalg.norm(right)
+    relative = values - np.asarray(camera_position, dtype=float)
+    depth = relative @ look
+    horizontal = relative @ right
+    vertical = relative @ up
+    tangent = np.tan(np.deg2rad(float(vertical_fov_degrees)) / 2.0)
+    safe_aspect = (
+        float(aspect) if np.isfinite(aspect) and aspect > 0.0 else width / height
+    )
+    if projection_mode == "orthographic":
+        focus_depth = float(
+            np.dot(
+                np.asarray(view_center, dtype=float)
+                - np.asarray(camera_position, dtype=float),
+                look,
+            )
+        )
+        half_height = max(abs(focus_depth) * tangent, np.finfo(float).eps)
+        denominator = np.full(len(values), half_height, dtype=float)
+    else:
+        denominator = depth * tangent
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ndc_x = horizontal / (denominator * safe_aspect)
+        ndc_y = vertical / denominator
+    screen = np.column_stack(
+        ((ndc_x + 1.0) * width / 2.0, (1.0 - ndc_y) * height / 2.0)
+    )
+    visible = (
+        np.all(np.isfinite(screen), axis=1)
+        & (depth > np.finfo(float).eps)
+        & (np.abs(ndc_x) <= 1.0)
+        & (np.abs(ndc_y) <= 1.0)
+    )
+    return screen, depth, visible
+
+
+def _declutter_label_indices(
+    screen_positions: np.ndarray,
+    depths: np.ndarray,
+    minimum_spacing: float,
+) -> np.ndarray:
+    """Keep the nearest label in each screen-space grid cell."""
+
+    if not len(screen_positions):
+        return np.empty(0, dtype=int)
+    spacing = max(float(minimum_spacing), 1.0)
+    near_to_far = np.argsort(np.asarray(depths, dtype=float))
+    cells = np.floor(np.asarray(screen_positions)[near_to_far] / spacing).astype(int)
+    _unique_cells, first = np.unique(cells, axis=0, return_index=True)
+    return near_to_far[np.sort(first)]
+
+
 def _log10_colour_values(values: np.ndarray) -> tuple[np.ndarray, float, int]:
     """Return log10 display values, clamping non-positive entries to the floor."""
 
@@ -418,6 +531,9 @@ class RegionState:
     radius_index: int = 0
     radius_scale: float = 0.25
     smooth_radius_joins: bool = True
+    show_node_numbers: bool = False
+    show_element_numbers: bool = False
+    number_label_spacing: float = 28.0
     transform_gizmo: bool = False
     surface_opacity: float = 0.65
     transform: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=float))
@@ -2231,6 +2347,33 @@ class LungVizApplication:
             psim.TextUnformatted(f"Surface vertices: {len(region.scene.vertices)}")
             psim.TextUnformatted(f"Triangles: {len(region.scene.faces)}")
 
+        if isinstance(region.scene, (MeshScene, PointScene)):
+            changed, show_nodes = psim.Checkbox(
+                "Show node identifiers", region.show_node_numbers
+            )
+            if changed:
+                region.show_node_numbers = show_nodes
+            if isinstance(region.scene, MeshScene):
+                changed, show_elements = psim.Checkbox(
+                    "Show element identifiers", region.show_element_numbers
+                )
+                if changed:
+                    region.show_element_numbers = show_elements
+            if region.show_node_numbers or region.show_element_numbers:
+                changed, spacing = psim.SliderFloat(
+                    "Number label spacing",
+                    region.number_label_spacing,
+                    8.0,
+                    80.0,
+                    "%.0f px",
+                )
+                if changed:
+                    region.number_label_spacing = float(spacing)
+                psim.TextWrapped(
+                    "Labels use the node and element identifiers stored in the EX files. "
+                    "Increase spacing to reduce overlap in dense branches."
+                )
+
         if isinstance(region.scene, SurfaceScene):
             changed, opacity = psim.SliderFloat(
                 "Surface opacity", region.surface_opacity, 0.0, 1.0
@@ -2481,6 +2624,94 @@ class LungVizApplication:
                     psim.BulletText(warning)
                 psim.TreePop()
 
+    @staticmethod
+    def _draw_identifier_labels(
+        ps,
+        psim,
+        region: RegionState,
+        points: np.ndarray,
+        identifiers: np.ndarray,
+        *,
+        color: tuple[float, float, float, float],
+        offset: tuple[float, float],
+    ) -> None:
+        if not len(points):
+            return
+        io = psim.GetIO()
+        display_size = io.DisplaySize
+        try:
+            width, height = float(display_size[0]), float(display_size[1])
+        except (AttributeError, TypeError):
+            width, height = float(display_size.x), float(display_size.y)
+        if width <= 0.0 or height <= 0.0:
+            return
+        camera = ps.get_view_camera_parameters()
+        screen, depths, visible = _project_world_points(
+            _transform_points(points, region.transform),
+            camera_position=camera.get_position(),
+            look_direction=camera.get_look_dir(),
+            up_direction=camera.get_up_dir(),
+            right_direction=camera.get_right_dir(),
+            vertical_fov_degrees=camera.get_fov_vertical_deg(),
+            aspect=camera.get_aspect(),
+            screen_size=(width, height),
+            projection_mode=ps.get_view_projection_mode(),
+            view_center=ps.get_view_center(),
+        )
+        visible_indices = np.flatnonzero(visible)
+        if not visible_indices.size:
+            return
+        selected = _declutter_label_indices(
+            screen[visible_indices],
+            depths[visible_indices],
+            region.number_label_spacing,
+        )
+        indices = visible_indices[selected]
+        draw_list = psim.GetBackgroundDrawList()
+        shadow = psim.ColorConvertFloat4ToU32((0.0, 0.0, 0.0, 0.9))
+        foreground = psim.ColorConvertFloat4ToU32(color)
+        for index in indices:
+            x = float(screen[index, 0] + offset[0])
+            y = float(screen[index, 1] + offset[1])
+            label = str(int(identifiers[index]))
+            draw_list.AddText((x + 1.0, y + 1.0), shadow, label)
+            draw_list.AddText((x, y), foreground, label)
+
+    def _draw_region_numbering(self, ps, psim) -> None:
+        for region in self.regions:
+            if not isinstance(region.scene, (MeshScene, PointScene)):
+                continue
+            try:
+                if (
+                    region.field_structure is not None
+                    and not region.field_structure.is_enabled()
+                ):
+                    continue
+            except AttributeError:
+                pass
+            if region.show_node_numbers:
+                points, identifiers = _node_label_data(region.scene)
+                self._draw_identifier_labels(
+                    ps,
+                    psim,
+                    region,
+                    points,
+                    identifiers,
+                    color=(1.0, 0.86, 0.18, 1.0),
+                    offset=(5.0, -12.0),
+                )
+            if region.show_element_numbers and isinstance(region.scene, MeshScene):
+                points, identifiers = _element_label_data(region.scene)
+                self._draw_identifier_labels(
+                    ps,
+                    psim,
+                    region,
+                    points,
+                    identifiers,
+                    color=(0.2, 0.9, 1.0, 1.0),
+                    offset=(5.0, 2.0),
+                )
+
     def callback(self) -> None:
         import polyscope as ps
         import polyscope.imgui as psim
@@ -2489,6 +2720,7 @@ class LungVizApplication:
         self._sync_ct_slice_transforms()
         self._sync_node_edit_gizmo(psim)
         self._consume_node_pick(ps, psim)
+        self._draw_region_numbering(ps, psim)
         self._consume_native_screenshot()
         self._consume_screenshot_shortcut(psim)
         psim.TextUnformatted("LungViZ")

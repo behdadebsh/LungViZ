@@ -8,9 +8,13 @@ from LungViZ.application import (
     LungVizApplication,
     _anatomical_plane_axes,
     _axis_rotation_matrix,
+    _declutter_label_indices,
+    _element_label_data,
     _endpoint_cap_positions,
     _log10_colour_values,
+    _node_label_data,
     _plane_mirror_matrix,
+    _project_world_points,
     _sample_volume,
     _slice_geometry,
 )
@@ -503,6 +507,101 @@ Element: 1 0 0
     np.testing.assert_allclose(
         parsed.nodes[0].derivatives["coordinates"], [-1.0, 1.0, 0.0], atol=1e-12
     )
+
+
+def test_number_labels_use_ex_node_and_element_identifiers(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region(
+        [EXAMPLES / "sample.exnode", EXAMPLES / "sample.exelem"]
+    )
+    region.scene.node_ids[:4] = [10, 20, 30, 40]
+    region.scene.edge_element_ids[:] = [101, 205, 309]
+
+    node_positions, node_ids = _node_label_data(region.scene)
+    element_positions, element_ids = _element_label_data(region.scene)
+
+    np.testing.assert_array_equal(node_ids, [10, 20, 30, 40])
+    np.testing.assert_array_equal(element_ids, [101, 205, 309])
+    np.testing.assert_allclose(node_positions, region.scene.coordinates[:4])
+    np.testing.assert_allclose(
+        element_positions,
+        [
+            [0.5, 0.0, 0.0],
+            [1.4, 0.3, 0.0],
+            [1.4, -0.3, 0.0],
+        ],
+    )
+
+
+def test_number_projection_culls_behind_camera_and_declutters_nearest():
+    screen, depths, visible = _project_world_points(
+        np.asarray(
+            [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 6.0]]
+        ),
+        camera_position=np.asarray([0.0, 0.0, 5.0]),
+        look_direction=np.asarray([0.0, 0.0, -1.0]),
+        up_direction=np.asarray([0.0, 1.0, 0.0]),
+        right_direction=np.asarray([1.0, 0.0, 0.0]),
+        vertical_fov_degrees=90.0,
+        aspect=1.0,
+        screen_size=(100.0, 100.0),
+        projection_mode="perspective",
+        view_center=np.zeros(3),
+    )
+
+    np.testing.assert_allclose(screen[0], [50.0, 50.0])
+    np.testing.assert_array_equal(visible, [True, True, True, False])
+    selected = _declutter_label_indices(
+        screen[:3], np.asarray([5.0, 2.0, 3.0]), 10.0
+    )
+    np.testing.assert_array_equal(selected, [1, 2])
+
+
+def test_identifier_overlay_draws_ex_values(monkeypatch):
+    fake = FakePolyscope()
+    monkeypatch.setitem(sys.modules, "polyscope", fake)
+    app = LungVizApplication()
+    region = app.load_region([EXAMPLES / "sample.exnode"])
+    region.number_label_spacing = 1.0
+    draw_calls = []
+    draw_list = SimpleNamespace(
+        AddText=lambda position, color, label: draw_calls.append(
+            (position, color, label)
+        )
+    )
+    camera = SimpleNamespace(
+        get_position=lambda: np.asarray([0.0, 0.0, 5.0]),
+        get_look_dir=lambda: np.asarray([0.0, 0.0, -1.0]),
+        get_up_dir=lambda: np.asarray([0.0, 1.0, 0.0]),
+        get_right_dir=lambda: np.asarray([1.0, 0.0, 0.0]),
+        get_fov_vertical_deg=lambda: 90.0,
+        get_aspect=lambda: 1.0,
+    )
+    label_ps = SimpleNamespace(
+        get_view_camera_parameters=lambda: camera,
+        get_view_projection_mode=lambda: "perspective",
+        get_view_center=lambda: np.zeros(3),
+    )
+    label_psim = SimpleNamespace(
+        GetIO=lambda: SimpleNamespace(DisplaySize=(200.0, 200.0)),
+        GetBackgroundDrawList=lambda: draw_list,
+        ColorConvertFloat4ToU32=lambda color: hash(color),
+    )
+    points, identifiers = _node_label_data(region.scene)
+
+    app._draw_identifier_labels(
+        label_ps,
+        label_psim,
+        region,
+        points,
+        identifiers,
+        color=(1.0, 1.0, 0.0, 1.0),
+        offset=(0.0, 0.0),
+    )
+
+    assert {call[2] for call in draw_calls} == {"1", "2", "3", "4"}
 
 
 def test_standalone_exnode_and_exdata_regions_can_edit_points(monkeypatch):

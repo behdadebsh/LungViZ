@@ -15,6 +15,13 @@ class VolumeLoadError(ValueError):
 
 @dataclass
 class CTVolume:
+    """A volume in the source image's native world-coordinate convention.
+
+    ``values`` retains the source voxel order. ``spacing`` gives the physical
+    distance along each voxel axis, while ``transform`` maps those scaled voxel
+    coordinates into the source world space without canonical reorientation.
+    """
+
     name: str
     source: Path
     values: np.ndarray
@@ -22,6 +29,8 @@ class CTVolume:
     transform: np.ndarray
     display_range: Tuple[float, float]
     warnings: List[str] = field(default_factory=list)
+    coordinate_system: str = "Unspecified"
+    axis_codes: Tuple[str, str, str] = ("X", "Y", "Z")
 
     @property
     def bound_high(self) -> np.ndarray:
@@ -51,7 +60,7 @@ def _display_range(values: np.ndarray) -> Tuple[float, float]:
 
 
 def load_nifti(path: str | Path) -> CTVolume:
-    """Load a NIfTI image while preserving its voxel-to-world affine."""
+    """Load NIfTI data without changing voxel order or its stored affine."""
 
     try:
         import nibabel as nib
@@ -79,6 +88,9 @@ def load_nifti(path: str | Path) -> CTVolume:
     transform = np.eye(4, dtype=float)
     transform[:3, :3] = affine[:3, :3] / spacing
     transform[:3, 3] = affine[:3, 3]
+    axis_codes = tuple(
+        str(code) if code is not None else "?" for code in nib.aff2axcodes(affine)
+    )
 
     return CTVolume(
         name=source.name.removesuffix(".gz").removesuffix(".nii"),
@@ -87,6 +99,8 @@ def load_nifti(path: str | Path) -> CTVolume:
         spacing=spacing,
         transform=transform,
         display_range=_display_range(values),
+        coordinate_system="NIfTI RAS+ world",
+        axis_codes=axis_codes,
         warnings=warnings,
     )
 
@@ -100,8 +114,21 @@ def _first_number(value, default: float) -> float:
         return float(value)
 
 
+def _dicom_axis_codes(directions: np.ndarray) -> Tuple[str, str, str]:
+    """Describe voxel-axis directions in DICOM's native LPS patient space."""
+
+    positive = ("L", "P", "S")
+    negative = ("R", "A", "I")
+    codes = []
+    for direction in np.asarray(directions, dtype=float).T:
+        dominant_axis = int(np.argmax(np.abs(direction)))
+        labels = positive if direction[dominant_axis] >= 0 else negative
+        codes.append(labels[dominant_axis])
+    return tuple(codes)
+
+
 def load_dicom_directory(path: str | Path) -> CTVolume:
-    """Load one DICOM series and convert stored values to Hounsfield units."""
+    """Load one DICOM series in native LPS patient coordinates."""
 
     try:
         import pydicom
@@ -210,6 +237,7 @@ def load_dicom_directory(path: str | Path) -> CTVolume:
     transform = np.eye(4, dtype=float)
     transform[:3, :3] = np.column_stack((x_axis, y_axis, z_axis))
     transform[:3, 3] = position
+    axis_codes = _dicom_axis_codes(transform[:3, :3])
 
     window_center = getattr(first, "WindowCenter", None)
     window_width = getattr(first, "WindowWidth", None)
@@ -227,5 +255,7 @@ def load_dicom_directory(path: str | Path) -> CTVolume:
         spacing=spacing,
         transform=transform,
         display_range=display_range,
+        coordinate_system="DICOM patient LPS",
+        axis_codes=axis_codes,
         warnings=warnings,
     )

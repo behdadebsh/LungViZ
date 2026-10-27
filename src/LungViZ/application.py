@@ -2616,6 +2616,12 @@ class LungVizApplication:
             psim.TextUnformatted(
                 f"Voxels: {volume.values.shape[0]} x {volume.values.shape[1]} x {volume.values.shape[2]}"
             )
+            psim.TextUnformatted(f"Coordinates: {volume.coordinate_system}")
+            psim.TextUnformatted("Voxel axes: " + " / ".join(volume.axis_codes))
+            psim.TextUnformatted(
+                "Origin: "
+                + ", ".join(f"{value:.4g}" for value in volume.transform[:3, 3])
+            )
             psim.TextUnformatted(
                 "Spacing: " + " x ".join(f"{value:.4g}" for value in volume.spacing)
             )

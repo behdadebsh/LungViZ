@@ -182,6 +182,14 @@ overwrites the loaded files.
 For CT data, choose **Load DICOM folder...** or **Load NIfTI...**. DICOM pixel
 values are converted with their rescale slope/intercept, normally yielding
 Hounsfield units. Image orientation, origin, and voxel spacing are retained.
+DICOM remains in its native LPS patient coordinate system. A NIfTI whose voxel
+axes are reported as R/A/S retains its voxel array and stored RAS+ affine. NIfTI
+axis arrangements containing L, P, and either S or I (including L/P/I) are
+reoriented to L/P/S voxel order with NiBabel's orientation transform. Their
+affine and origin are recalculated for the reordered array and expressed in
+patient LPS coordinates. Other NIfTI axis arrangements retain their stored voxel
+order and RAS+ world affine. The CT panel reports the resulting coordinate
+system, voxel axis directions, and origin.
 The three grayscale planes start at the volume centre and are hidden by default.
 Enable only the views you need, move native slices with their sliders, or use
 the selected plane's transform gizmo for an oblique view. Oblique images are

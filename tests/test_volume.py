@@ -8,25 +8,94 @@ from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 from LungViZ.volume import load_dicom_directory, load_nifti
 
 
-def test_load_nifti_preserves_affine_direction_spacing_and_origin(tmp_path):
+def test_load_nifti_keeps_ras_oriented_affine_in_ras_world(tmp_path):
     values = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
-    affine = np.asarray(
+    ras_affine = np.asarray(
         [
-            [-1.0, 0.0, 0.0, 10.0],
+            [1.0, 0.0, 0.0, 10.0],
             [0.0, 2.0, 0.0, 20.0],
             [0.0, 0.0, 3.0, 30.0],
             [0.0, 0.0, 0.0, 1.0],
         ]
     )
-    path = tmp_path / "scan.nii.gz"
-    nib.save(nib.Nifti1Image(values, affine), path)
+    path = tmp_path / "ras_scan.nii.gz"
+    nib.save(nib.Nifti1Image(values, ras_affine), path)
 
     volume = load_nifti(path)
 
     np.testing.assert_allclose(volume.values, values)
     np.testing.assert_allclose(volume.spacing, [1, 2, 3])
-    np.testing.assert_allclose(np.diag(volume.transform)[:3], [-1, 1, 1])
+    np.testing.assert_allclose(np.diag(volume.transform)[:3], [1, 1, 1])
     np.testing.assert_allclose(volume.transform[:3, 3], [10, 20, 30])
+    assert volume.coordinate_system == "NIfTI RAS+ world"
+    assert volume.axis_codes == ("R", "A", "S")
+
+    voxel = np.asarray([1.0, 2.0, 3.0, 1.0])
+    scaled_voxel = voxel.copy()
+    scaled_voxel[:3] *= volume.spacing
+    np.testing.assert_allclose(volume.transform @ scaled_voxel, ras_affine @ voxel)
+
+
+def test_load_nifti_keeps_lps_voxels_in_patient_lps(tmp_path):
+    values = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    lps_affine = np.asarray(
+        [
+            [1.0, 0.0, 0.0, 10.0],
+            [0.0, 2.0, 0.0, 20.0],
+            [0.0, 0.0, 3.0, 30.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    ras_to_lps = np.diag([-1.0, -1.0, 1.0, 1.0])
+    ras_affine = ras_to_lps @ lps_affine
+    path = tmp_path / "scan.nii.gz"
+    nib.save(nib.Nifti1Image(values, ras_affine), path)
+
+    volume = load_nifti(path)
+
+    np.testing.assert_allclose(volume.values, values)
+    np.testing.assert_allclose(volume.spacing, [1, 2, 3])
+    np.testing.assert_allclose(np.diag(volume.transform)[:3], [1, 1, 1])
+    np.testing.assert_allclose(volume.transform[:3, 3], [10, 20, 30])
+    assert volume.coordinate_system == "Patient LPS (NIfTI)"
+    assert volume.axis_codes == ("L", "P", "S")
+
+    voxel = np.asarray([1.0, 2.0, 3.0, 1.0])
+    scaled_voxel = voxel.copy()
+    scaled_voxel[:3] *= volume.spacing
+    np.testing.assert_allclose(volume.transform @ scaled_voxel, lps_affine @ voxel)
+
+
+def test_load_nifti_reorients_lpi_voxels_to_patient_lps(tmp_path):
+    values = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    lpi_ras_affine = np.asarray(
+        [
+            [-1.0, 0.0, 0.0, 10.0],
+            [0.0, -2.0, 0.0, 20.0],
+            [0.0, 0.0, -3.0, 30.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    path = tmp_path / "lpi_scan.nii.gz"
+    nib.save(nib.Nifti1Image(values, lpi_ras_affine), path)
+
+    volume = load_nifti(path)
+
+    np.testing.assert_allclose(volume.values, np.flip(values, axis=2))
+    np.testing.assert_allclose(volume.spacing, [1, 2, 3])
+    np.testing.assert_allclose(
+        volume.transform,
+        np.asarray(
+            [
+                [1.0, 0.0, 0.0, -10.0],
+                [0.0, 1.0, 0.0, -20.0],
+                [0.0, 0.0, 1.0, 21.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        ),
+    )
+    assert volume.coordinate_system == "Patient LPS (NIfTI)"
+    assert volume.axis_codes == ("L", "P", "S")
 
 
 def _write_dicom_slice(path: Path, z: float, instance: int, pixels: np.ndarray) -> None:
@@ -68,5 +137,7 @@ def test_load_dicom_sorts_slices_and_converts_to_patient_space_hu(tmp_path):
     assert volume.values.shape == (3, 2, 2)
     np.testing.assert_allclose(volume.spacing, [1, 2, 5])
     np.testing.assert_allclose(volume.transform[:3, 3], [10, 20, 30])
+    assert volume.coordinate_system == "DICOM patient LPS"
+    assert volume.axis_codes == ("L", "P", "S")
     assert volume.values[0, 0, 0] == -1000
     assert volume.values[0, 0, 1] == -992

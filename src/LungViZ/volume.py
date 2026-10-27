@@ -13,8 +13,18 @@ class VolumeLoadError(ValueError):
     """Raised when medical image data cannot be converted to a 3D volume."""
 
 
+_RAS_TO_LPS = np.diag([-1.0, -1.0, 1.0, 1.0])
+
+
 @dataclass
 class CTVolume:
+    """A volume in its reported patient/world-coordinate convention.
+
+    ``values`` contains the voxel order used by the viewer. ``spacing`` gives
+    the physical distance along each voxel axis, while ``transform`` maps those
+    scaled voxel coordinates into the reported world space.
+    """
+
     name: str
     source: Path
     values: np.ndarray
@@ -22,6 +32,8 @@ class CTVolume:
     transform: np.ndarray
     display_range: Tuple[float, float]
     warnings: List[str] = field(default_factory=list)
+    coordinate_system: str = "Unspecified"
+    axis_codes: Tuple[str, str, str] = ("X", "Y", "Z")
 
     @property
     def bound_high(self) -> np.ndarray:
@@ -51,7 +63,7 @@ def _display_range(values: np.ndarray) -> Tuple[float, float]:
 
 
 def load_nifti(path: str | Path) -> CTVolume:
-    """Load a NIfTI image while preserving its voxel-to-world affine."""
+    """Load NIfTI voxels, reorienting LPS-family data into patient LPS space."""
 
     try:
         import nibabel as nib
@@ -72,13 +84,44 @@ def load_nifti(path: str | Path) -> CTVolume:
     if values.ndim != 3:
         raise VolumeLoadError(f"Expected a 3D NIfTI image, found shape {values.shape}")
 
-    affine = np.asarray(image.affine, dtype=float)
-    spacing = np.linalg.norm(affine[:3, :3], axis=0)
+    ras_affine = np.asarray(image.affine, dtype=float)
+    stored_axis_codes = tuple(
+        str(code) if code is not None else "?"
+        for code in nib.aff2axcodes(ras_affine)
+    )
+    is_lps_family = (
+        "L" in stored_axis_codes
+        and "P" in stored_axis_codes
+        and any(code in stored_axis_codes for code in ("S", "I"))
+    )
+    if is_lps_family:
+        stored_orientation = nib.orientations.io_orientation(ras_affine)
+        lps_orientation = nib.orientations.axcodes2ornt(("L", "P", "S"))
+        voxel_orientation = nib.orientations.ornt_transform(
+            stored_orientation, lps_orientation
+        )
+        original_shape = values.shape
+        values = np.asarray(
+            nib.orientations.apply_orientation(values, voxel_orientation),
+            dtype=np.float32,
+        )
+        reoriented_ras_affine = ras_affine @ nib.orientations.inv_ornt_aff(
+            voxel_orientation, original_shape
+        )
+        world_affine = _RAS_TO_LPS @ reoriented_ras_affine
+        coordinate_system = "Patient LPS (NIfTI)"
+        axis_codes = _lps_axis_codes(world_affine[:3, :3])
+    else:
+        world_affine = ras_affine
+        coordinate_system = "NIfTI RAS+ world"
+        axis_codes = stored_axis_codes
+
+    spacing = np.linalg.norm(world_affine[:3, :3], axis=0)
     if np.any(spacing <= 0):
         raise VolumeLoadError("NIfTI affine contains a zero voxel spacing")
     transform = np.eye(4, dtype=float)
-    transform[:3, :3] = affine[:3, :3] / spacing
-    transform[:3, 3] = affine[:3, 3]
+    transform[:3, :3] = world_affine[:3, :3] / spacing
+    transform[:3, 3] = world_affine[:3, 3]
 
     return CTVolume(
         name=source.name.removesuffix(".gz").removesuffix(".nii"),
@@ -87,6 +130,8 @@ def load_nifti(path: str | Path) -> CTVolume:
         spacing=spacing,
         transform=transform,
         display_range=_display_range(values),
+        coordinate_system=coordinate_system,
+        axis_codes=axis_codes,
         warnings=warnings,
     )
 
@@ -100,8 +145,21 @@ def _first_number(value, default: float) -> float:
         return float(value)
 
 
+def _lps_axis_codes(directions: np.ndarray) -> Tuple[str, str, str]:
+    """Describe voxel-axis directions in LPS patient space."""
+
+    positive = ("L", "P", "S")
+    negative = ("R", "A", "I")
+    codes = []
+    for direction in np.asarray(directions, dtype=float).T:
+        dominant_axis = int(np.argmax(np.abs(direction)))
+        labels = positive if direction[dominant_axis] >= 0 else negative
+        codes.append(labels[dominant_axis])
+    return tuple(codes)
+
+
 def load_dicom_directory(path: str | Path) -> CTVolume:
-    """Load one DICOM series and convert stored values to Hounsfield units."""
+    """Load one DICOM series in native LPS patient coordinates."""
 
     try:
         import pydicom
@@ -210,6 +268,7 @@ def load_dicom_directory(path: str | Path) -> CTVolume:
     transform = np.eye(4, dtype=float)
     transform[:3, :3] = np.column_stack((x_axis, y_axis, z_axis))
     transform[:3, 3] = position
+    axis_codes = _lps_axis_codes(transform[:3, :3])
 
     window_center = getattr(first, "WindowCenter", None)
     window_width = getattr(first, "WindowWidth", None)
@@ -227,5 +286,7 @@ def load_dicom_directory(path: str | Path) -> CTVolume:
         spacing=spacing,
         transform=transform,
         display_range=display_range,
+        coordinate_system="DICOM patient LPS",
+        axis_codes=axis_codes,
         warnings=warnings,
     )

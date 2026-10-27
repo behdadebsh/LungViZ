@@ -13,13 +13,16 @@ class VolumeLoadError(ValueError):
     """Raised when medical image data cannot be converted to a 3D volume."""
 
 
+_RAS_TO_LPS = np.diag([-1.0, -1.0, 1.0, 1.0])
+
+
 @dataclass
 class CTVolume:
-    """A volume in the source image's native world-coordinate convention.
+    """A volume in its reported patient/world-coordinate convention.
 
     ``values`` retains the source voxel order. ``spacing`` gives the physical
     distance along each voxel axis, while ``transform`` maps those scaled voxel
-    coordinates into the source world space without canonical reorientation.
+    coordinates into the reported world space without reordering the voxels.
     """
 
     name: str
@@ -60,7 +63,7 @@ def _display_range(values: np.ndarray) -> Tuple[float, float]:
 
 
 def load_nifti(path: str | Path) -> CTVolume:
-    """Load NIfTI data without changing voxel order or its stored affine."""
+    """Load NIfTI voxels and express its RAS+ header affine in patient LPS."""
 
     try:
         import nibabel as nib
@@ -81,16 +84,15 @@ def load_nifti(path: str | Path) -> CTVolume:
     if values.ndim != 3:
         raise VolumeLoadError(f"Expected a 3D NIfTI image, found shape {values.shape}")
 
-    affine = np.asarray(image.affine, dtype=float)
-    spacing = np.linalg.norm(affine[:3, :3], axis=0)
+    ras_affine = np.asarray(image.affine, dtype=float)
+    lps_affine = _RAS_TO_LPS @ ras_affine
+    spacing = np.linalg.norm(lps_affine[:3, :3], axis=0)
     if np.any(spacing <= 0):
         raise VolumeLoadError("NIfTI affine contains a zero voxel spacing")
     transform = np.eye(4, dtype=float)
-    transform[:3, :3] = affine[:3, :3] / spacing
-    transform[:3, 3] = affine[:3, 3]
-    axis_codes = tuple(
-        str(code) if code is not None else "?" for code in nib.aff2axcodes(affine)
-    )
+    transform[:3, :3] = lps_affine[:3, :3] / spacing
+    transform[:3, 3] = lps_affine[:3, 3]
+    axis_codes = _lps_axis_codes(transform[:3, :3])
 
     return CTVolume(
         name=source.name.removesuffix(".gz").removesuffix(".nii"),
@@ -99,7 +101,7 @@ def load_nifti(path: str | Path) -> CTVolume:
         spacing=spacing,
         transform=transform,
         display_range=_display_range(values),
-        coordinate_system="NIfTI RAS+ world",
+        coordinate_system="Patient LPS (from NIfTI RAS+ affine)",
         axis_codes=axis_codes,
         warnings=warnings,
     )
@@ -114,8 +116,8 @@ def _first_number(value, default: float) -> float:
         return float(value)
 
 
-def _dicom_axis_codes(directions: np.ndarray) -> Tuple[str, str, str]:
-    """Describe voxel-axis directions in DICOM's native LPS patient space."""
+def _lps_axis_codes(directions: np.ndarray) -> Tuple[str, str, str]:
+    """Describe voxel-axis directions in LPS patient space."""
 
     positive = ("L", "P", "S")
     negative = ("R", "A", "I")
@@ -237,7 +239,7 @@ def load_dicom_directory(path: str | Path) -> CTVolume:
     transform = np.eye(4, dtype=float)
     transform[:3, :3] = np.column_stack((x_axis, y_axis, z_axis))
     transform[:3, 3] = position
-    axis_codes = _dicom_axis_codes(transform[:3, :3])
+    axis_codes = _lps_axis_codes(transform[:3, :3])
 
     window_center = getattr(first, "WindowCenter", None)
     window_width = getattr(first, "WindowWidth", None)

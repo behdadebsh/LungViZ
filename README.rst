@@ -182,11 +182,11 @@ overwrites the loaded files.
 For CT data, choose **Load DICOM folder...** or **Load NIfTI...**. DICOM pixel
 values are converted with their rescale slope/intercept, normally yielding
 Hounsfield units. Image orientation, origin, and voxel spacing are retained.
-LungViZ does not canonicalise or reorder the loaded voxel array: DICOM remains
-in its native LPS patient coordinate system, while NIfTI retains the RAS+ world
-affine stored in its header. The CT panel reports the coordinate system, voxel
-axis directions, and source origin so convention mismatches are visible before
-aligning other geometry.
+LungViZ does not canonicalise or reorder the loaded voxel array. DICOM remains
+in its native LPS patient coordinate system. NIfTI's stored RAS+ world affine is
+converted to the equivalent patient LPS affine, including the origin, so DICOM
+and NIfTI use one convention in the viewer. The CT panel reports the coordinate
+system, voxel axis directions, and resulting origin before aligning geometry.
 The three grayscale planes start at the volume centre and are hidden by default.
 Enable only the views you need, move native slices with their sliders, or use
 the selected plane's transform gizmo for an oblique view. Oblique images are

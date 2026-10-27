@@ -63,7 +63,7 @@ def _display_range(values: np.ndarray) -> Tuple[float, float]:
 
 
 def load_nifti(path: str | Path) -> CTVolume:
-    """Load NIfTI voxels, reorienting L/P/S data into patient LPS space."""
+    """Load NIfTI voxels, reorienting LPS-family data into patient LPS space."""
 
     try:
         import nibabel as nib
@@ -89,11 +89,16 @@ def load_nifti(path: str | Path) -> CTVolume:
         str(code) if code is not None else "?"
         for code in nib.aff2axcodes(ras_affine)
     )
-    if stored_axis_codes == ("L", "P", "S"):
+    is_lps_family = (
+        "L" in stored_axis_codes
+        and "P" in stored_axis_codes
+        and any(code in stored_axis_codes for code in ("S", "I"))
+    )
+    if is_lps_family:
         stored_orientation = nib.orientations.io_orientation(ras_affine)
-        ras_orientation = nib.orientations.axcodes2ornt(("R", "A", "S"))
+        lps_orientation = nib.orientations.axcodes2ornt(("L", "P", "S"))
         voxel_orientation = nib.orientations.ornt_transform(
-            stored_orientation, ras_orientation
+            stored_orientation, lps_orientation
         )
         original_shape = values.shape
         values = np.asarray(
@@ -104,7 +109,7 @@ def load_nifti(path: str | Path) -> CTVolume:
             voxel_orientation, original_shape
         )
         world_affine = _RAS_TO_LPS @ reoriented_ras_affine
-        coordinate_system = "Patient LPS (reoriented NIfTI voxels)"
+        coordinate_system = "Patient LPS (NIfTI)"
         axis_codes = _lps_axis_codes(world_affine[:3, :3])
     else:
         world_affine = ras_affine

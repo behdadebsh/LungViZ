@@ -20,9 +20,9 @@ _RAS_TO_LPS = np.diag([-1.0, -1.0, 1.0, 1.0])
 class CTVolume:
     """A volume in its reported patient/world-coordinate convention.
 
-    ``values`` retains the source voxel order. ``spacing`` gives the physical
-    distance along each voxel axis, while ``transform`` maps those scaled voxel
-    coordinates into the reported world space without reordering the voxels.
+    ``values`` contains the voxel order used by the viewer. ``spacing`` gives
+    the physical distance along each voxel axis, while ``transform`` maps those
+    scaled voxel coordinates into the reported world space.
     """
 
     name: str
@@ -63,7 +63,7 @@ def _display_range(values: np.ndarray) -> Tuple[float, float]:
 
 
 def load_nifti(path: str | Path) -> CTVolume:
-    """Load NIfTI voxels, converting L/P/S-oriented images to patient LPS."""
+    """Load NIfTI voxels, reorienting L/P/S data into patient LPS space."""
 
     try:
         import nibabel as nib
@@ -90,8 +90,21 @@ def load_nifti(path: str | Path) -> CTVolume:
         for code in nib.aff2axcodes(ras_affine)
     )
     if stored_axis_codes == ("L", "P", "S"):
-        world_affine = _RAS_TO_LPS @ ras_affine
-        coordinate_system = "Patient LPS (from L/P/S-oriented NIfTI)"
+        stored_orientation = nib.orientations.io_orientation(ras_affine)
+        ras_orientation = nib.orientations.axcodes2ornt(("R", "A", "S"))
+        voxel_orientation = nib.orientations.ornt_transform(
+            stored_orientation, ras_orientation
+        )
+        original_shape = values.shape
+        values = np.asarray(
+            nib.orientations.apply_orientation(values, voxel_orientation),
+            dtype=np.float32,
+        )
+        reoriented_ras_affine = ras_affine @ nib.orientations.inv_ornt_aff(
+            voxel_orientation, original_shape
+        )
+        world_affine = _RAS_TO_LPS @ reoriented_ras_affine
+        coordinate_system = "Patient LPS (reoriented NIfTI voxels)"
         axis_codes = _lps_axis_codes(world_affine[:3, :3])
     else:
         world_affine = ras_affine

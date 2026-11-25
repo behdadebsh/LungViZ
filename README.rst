@@ -8,6 +8,16 @@ meshes, triangulated surfaces, and medical image volumes. It displays
 ``.exnode``, ``.exelem``, ``.exdata``, STL, and PLY geometry together with
 DICOM or NIfTI CT images in a Polyscope window.
 
+User guide
+----------
+
+* `Install LungViZ and try the sample airway <docs/getting-started.rst>`_
+* `Load regions and visualise fields <docs/geometry.rst>`_
+* `Browse CT slices and align geometry <docs/ct.rst>`_
+* `Edit points, export EX files, and save screenshots <docs/editing.rst>`_
+* `Troubleshoot common issues <docs/troubleshooting.rst>`_
+* `Build the complete guide as HTML or PDF <docs/building.rst>`_
+
 Features
 --------
 
